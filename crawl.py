@@ -2,8 +2,8 @@ import requests
 from requests.packages.urllib3.exceptions import InsecureRequestWarning
 requests.packages.urllib3.disable_warnings(category=InsecureRequestWarning)
 
-URL = "https://dict.variants.moe.edu.tw/appendix.jsp?ID=3"
-OUTPUT_PATH = "E:\Benkyute Kudasai\Chinese\Building-a-dictionary-of-Chinese-variants\variants.html"
+URL = r"https://dict.variants.moe.edu.tw/appendix.jsp?ID=1&page=1"
+OUTPUT_PATH = r"E:\Benkyute Kudasai\Chinese\Building-a-dictionary-of-Chinese-variants\variants.html"
 
 def fetch_and_save_insecure(url: str, output_path: str) -> None:
     try:
