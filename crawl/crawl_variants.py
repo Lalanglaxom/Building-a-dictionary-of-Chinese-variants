@@ -6,6 +6,8 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+import base64
+import os
 
 # ── Configure Selenium ─────────────────────────
 options = Options()
@@ -29,6 +31,18 @@ CREATE TABLE IF NOT EXISTS variants (
         ON UPDATE CASCADE
 );
 """)
+
+# Check existing columns in the table
+cur.execute("PRAGMA table_info(variants);")
+columns = [col[1] for col in cur.fetchall()]  # list of column names
+
+# Add img_path only if it doesn’t exist
+if "img_path" not in columns:
+    cur.execute("ALTER TABLE variants ADD COLUMN img_path TEXT;")
+    conn.commit()
+    print("✅ Added column 'img_path' to variants.")
+else:
+    print("ℹ️ Column 'img_path' already exists.")
 
 # ── Get list of main entries ───────────────────
 cur.execute("SELECT code, char, detail_url FROM summary")
@@ -59,30 +73,59 @@ for i, (main_code, main_char, url) in enumerate(entries, 1):
     variant_links = details_block.find_all("a", href=True)
     if not variant_links:
         continue
-
+    
     for a in variant_links:
-        # Build the variant code: main_code + data_sn (e.g. A00001-001)
         data_sn = str(a.get("data-sn", "")).strip()  # "-001"
-        suffix = data_sn if data_sn else "-000"
+        suffix  = data_sn if data_sn else "-000"
         variant_code = f"{main_code}{suffix}"
 
+        img = a.find("img")
         variant_char = a.get_text(strip=True)
-        if not variant_char:
-            img = a.find("img")
-            if img and img.get("alt"):
-                variant_char = img["alt"]
+        img_path = None  # optional path field
+
+    # treat as image variant if there's an <img> OR the visible text looks like a code
+    if img or variant_char.startswith(main_code):
+        if img:
+            src = img.get("src", "")
+            if src and src.startswith("data:image"): # Okay
+                try:
+                    header, b64data = src.split(",", 1)
+                    img_bytes = base64.b64decode(b64data)
+
+                    os.makedirs("variant_images", exist_ok=True)
+                    file_name = f"{variant_code}.png"
+                    img_path  = os.path.join("variant_images", file_name)
+
+                    with open(img_path, "wb") as f:
+                        f.write(img_bytes)
+
+                    print(f"🖼️  Saved image for {variant_code}")
+                except Exception as e:
+                    print(f"⚠️  Error decoding image for {variant_code}: {e}")
+            else:
+                print(f"ℹ️  No image data for {variant_code}")
+
+            # set display text
+            variant_char = img.get("alt", "[img]") or "[img]"
+        else:
+            # had no <img>, only a code‑like text — keep the text as marker
+            variant_char = variant_char or "[img]"
+
+    # text‑only variant: keep normal glyph
+    else:
+        variant_char = variant_char or "[?]"
 
         href = urljoin("https://dict.variants.moe.edu.tw/", str(a.get("href", "")))
 
         cur.execute("""
             INSERT OR REPLACE INTO variants
-            (variant_code, main_code, variant_char, href)
-            VALUES (?, ?, ?, ?)
-        """, (variant_code, main_code, variant_char, href))
+            (variant_code, main_code, variant_char, href, img_path)
+            VALUES (?, ?, ?, ?, ?)
+        """, (variant_code, main_code, variant_char, href, img_path))
 
     conn.commit()
     print(f"✅ Saved {len(variant_links)} variants for {main_char}")
-    time.sleep(1.2)
+    time.sleep(1)
 
 driver.quit()
 conn.close()
