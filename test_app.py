@@ -260,7 +260,7 @@ class CharacterDictionary(QMainWindow):
         result_layout.addWidget(variants_label)
         
         self.result_label = QLabel('')
-        result_font = QFont('Arial', 18)
+        result_font = QFont('TW-MOE-Std-Kai', 18)
         self.result_label.setFont(result_font)
         self.result_label.setAlignment(Qt.AlignCenter)
         self.result_label.setWordWrap(True)

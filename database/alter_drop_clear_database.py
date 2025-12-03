@@ -8,6 +8,7 @@ cur = conn.cursor()
 # cur.execute("DROP TABLE variants;")
 # cur.execute("DROP TABLE variants;")
 # cur.execute("DROP TABLE variant_descriptions;")
+cur.execute("DROP TABLE descriptions;")
 conn.commit()
 
 # Optional: reclaim disk space
