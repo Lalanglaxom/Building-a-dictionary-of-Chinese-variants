@@ -67,6 +67,7 @@ def get_character_description(char):
 
 def resolve_image_path(img_path):
     """Resolve image path - handles both relative and absolute paths"""
+
     if not img_path:
         return None
     
@@ -100,7 +101,9 @@ def format_text_with_images(text, section_type="default"):
     # Replace image placeholders with HTML img tags
     def replace_image(match):
         img_path = match.group(1).strip()
+        print(img_path)
         resolved_path = resolve_image_path(img_path)
+        
         
         if resolved_path:
             # Normalize path separators and use file:/// protocol
@@ -109,7 +112,8 @@ def format_text_with_images(text, section_type="default"):
         return f'[img:{img_path}]'
     
     # Replace [img:path] with actual images
-    text = re.sub(r'$$img:([^$$]+)\]', replace_image, text)
+    text = re.sub(r'img:([^$$]*?\.png)\]', replace_image, text)
+    
     
     # Handle line breaks based on section type
     if section_type == "shuowen":
