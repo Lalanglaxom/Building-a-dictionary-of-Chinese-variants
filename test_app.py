@@ -1,17 +1,29 @@
 import sys
 import sqlite3
 import os
+import re
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                              QHBoxLayout, QLabel, QLineEdit, QPushButton, 
-                             QFrame, QScrollArea, QMessageBox)
-from PyQt5.QtGui import QFont, QPixmap, QIcon, QColor
-from PyQt5.QtCore import Qt, QUrl
-from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
+                             QFrame, QScrollArea, QMessageBox, QTextEdit)
+from PyQt5.QtGui import QFont, QPixmap, QCursor, QFontDatabase
+from PyQt5.QtCore import Qt, pyqtSignal
 
 DB = "dictionary.db"
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# Font fallback for Chinese characters
+CHINESE_FONTS = "'TW-Sung-Plus'"
+CHINESE_FONT_LIST = ['TW-Sung-Plus']
+
+def get_available_font():
+    """Get first available font from the fallback list"""
+    available = QFontDatabase().families()
+    for font in CHINESE_FONT_LIST:
+        if font in available:
+            return font
+    return 'SimSun'
 
 def get_variants(char):
-    """Fetch variants and image paths from database"""
     conn = sqlite3.connect(DB)
     cur = conn.cursor()
     cur.execute("SELECT code FROM summary WHERE char=?;", (char,))
@@ -19,396 +31,374 @@ def get_variants(char):
     if not row:
         conn.close()
         return []
-    main_code = row[0]
-    cur.execute("SELECT variant_char, img_path FROM variants WHERE main_code=?;", (main_code,))
+    cur.execute("SELECT variant_code, variant_char, img_path FROM variants WHERE main_code=? ORDER BY variant_code;", (row[0],))
     rows = cur.fetchall()
     conn.close()
     return rows
+
+def get_character_info(char):
+    conn = sqlite3.connect(DB)
+    cur = conn.cursor()
+    cur.execute("SELECT code, char FROM summary WHERE char=?;", (char,))
+    row = cur.fetchone()
+    conn.close()
+    return row
+
+def get_character_description(char):
+    conn = sqlite3.connect(DB)
+    cur = conn.cursor()
+    cur.execute("SELECT code FROM summary WHERE char=?;", (char,))
+    row = cur.fetchone()
+    if not row:
+        conn.close()
+        return None
+    cur.execute("SELECT standard_character, shuowen_etymology, character_style, zhuyin_pronunciation, hanyu_pinyin, definition FROM descriptions WHERE main_code=?;", (row[0],))
+    description = cur.fetchone()
+    conn.close()
+    return description
+
+def resolve_image_path(img_path):
+    if not img_path:
+        return None
+    img_path = img_path.strip()
+    if os.path.isabs(img_path) and os.path.exists(img_path):
+        return img_path
+    full_path = os.path.join(SCRIPT_DIR, img_path)
+    if os.path.exists(full_path):
+        return full_path
+    if os.path.exists(img_path):
+        return os.path.abspath(img_path)
+    return None
+
+def format_text_with_images(text, section_type="default"):
+    if not text:
+        return ""
+    def replace_image(match):
+        img_path = match.group(1).strip()
+        resolved_path = resolve_image_path(img_path)
+        if resolved_path:
+            return f'<img src="file:///{resolved_path.replace(chr(92), "/")}" style="max-height: 28px; vertical-align: middle; margin: 0 2px;">'
+        return f'[img:{img_path}]'
+    text = re.sub(r'img:([^$$]*?\.png)\]', replace_image, text)
+    if section_type == "shuowen":
+        text = re.sub(r'(段注本[：:])', r'<br>\1', text)
+        text = re.sub(r'(?<!^)(大徐本[：:])', r'<br>\1', text)
+    elif section_type == "style":
+        text = re.sub(r'。\s*「', r'。<br>「', text)
+    elif section_type == "definition":
+        text = re.sub(r'(?<!^)(\d+\.)\s*', r'<br><br>\1 ', text)
+    text = text.replace('\n', '<br>')
+    return f'<html><body style="font-family:{CHINESE_FONTS};font-size:14px;line-height:1.9;margin:0;padding:5px;">{text}</body></html>'
+
+
+class VariantCharacterBox(QFrame):
+    clicked = pyqtSignal(object)
+    
+    def __init__(self, char="", code="", img_path="", parent=None):
+        super().__init__(parent)
+        self.char, self.code, self.is_selected = char, code, False
+        self.setFixedSize(70, 75)
+        self.setCursor(QCursor(Qt.PointingHandCursor))
+        layout = QVBoxLayout()
+        layout.setContentsMargins(3, 3, 3, 3)
+        layout.setSpacing(2)
+        self.code_label = QLabel(code)
+        self.code_label.setAlignment(Qt.AlignCenter)
+        self.code_label.setFixedHeight(15)
+        layout.addWidget(self.code_label)
+        resolved_img_path = resolve_image_path(img_path) if img_path else None
+        self.char_label = QLabel()
+        self.char_label.setAlignment(Qt.AlignCenter)
+        if resolved_img_path:
+            pixmap = QPixmap(resolved_img_path)
+            if not pixmap.isNull():
+                self.char_label.setPixmap(pixmap.scaled(50, 50, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            else:
+                self.char_label.setText(char or "?")
+                self.char_label.setFont(QFont(get_available_font(), 26))
+            self.is_image = True
+        else:
+            self.char_label.setText(char or "")
+            self.char_label.setFont(QFont(get_available_font(), 26))
+            self.is_image = False
+        layout.addWidget(self.char_label, 1)
+        self.setLayout(layout)
+        self.update_style()
+    
+    def update_style(self):
+        if self.is_selected:
+            self.setStyleSheet("VariantCharacterBox{background:#8B0000;border:1px solid #600000;}")
+            self.code_label.setStyleSheet("color:white;background:transparent;border:none;font-size:9px;")
+            self.char_label.setStyleSheet(f"color:{'transparent' if self.is_image else 'white'};background:transparent;border:none;")
+        else:
+            self.setStyleSheet("VariantCharacterBox{background:white;border:1px solid #999;}VariantCharacterBox:hover{border:2px solid #8B0000;}")
+            self.code_label.setStyleSheet("color:#666;background:transparent;border:none;font-size:9px;")
+            self.char_label.setStyleSheet("color:#333;background:transparent;border:none;")
+    
+    def set_selected(self, selected):
+        self.is_selected = selected
+        self.update_style()
+    
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.clicked.emit(self)
+        super().mousePressEvent(event)
+
+
+class SectionHeader(QFrame):
+    def __init__(self, text, parent=None):
+        super().__init__(parent)
+        self.setFixedHeight(35)
+        layout = QHBoxLayout()
+        layout.setContentsMargins(15, 0, 15, 0)
+        accent = QFrame()
+        accent.setFixedSize(4, 20)
+        accent.setStyleSheet("background:white;border:none;")
+        layout.addWidget(accent)
+        label = QLabel(text)
+        label.setStyleSheet("color:white;font-size:14px;font-weight:bold;background:transparent;border:none;")
+        layout.addWidget(label)
+        layout.addStretch()
+        self.setLayout(layout)
+        self.setStyleSheet("QFrame{background:#8B0000;border:none;}")
+
+
+class TableRow(QFrame):
+    def __init__(self, label_text, has_top_accent=False, parent=None):
+        super().__init__(parent)
+        self.setMinimumHeight(50)
+        main_layout = QVBoxLayout()
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+        if has_top_accent:
+            accent = QFrame()
+            accent.setFixedHeight(3)
+            accent.setStyleSheet("background:#8B0000;border:none;")
+            main_layout.addWidget(accent)
+        row_widget = QWidget()
+        layout = QHBoxLayout()
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        self.label_frame = QFrame()
+        self.label_frame.setFixedWidth(100)
+        self.label_frame.setStyleSheet("QFrame{background:#F5F5F0;border:1px solid #CCC;border-right:none;}")
+        label_layout = QVBoxLayout()
+        label_layout.setContentsMargins(8, 8, 8, 8)
+        label = QLabel(label_text)
+        label.setAlignment(Qt.AlignCenter)
+        label.setStyleSheet("font-size:13px;font-weight:bold;color:#333;background:transparent;border:none;")
+        label.setWordWrap(True)
+        label_layout.addWidget(label)
+        self.label_frame.setLayout(label_layout)
+        layout.addWidget(self.label_frame)
+        self.content_frame = QFrame()
+        self.content_frame.setStyleSheet("QFrame{background:white;border:1px solid #CCC;}")
+        self.content_layout = QVBoxLayout()
+        self.content_layout.setContentsMargins(10, 8, 10, 8)
+        self.content_frame.setLayout(self.content_layout)
+        layout.addWidget(self.content_frame, 1)
+        row_widget.setLayout(layout)
+        main_layout.addWidget(row_widget)
+        self.setLayout(main_layout)
+    
+    def set_html_content(self, html, min_height=60):
+        self.clear_content()
+        text_edit = QTextEdit()
+        text_edit.setReadOnly(True)
+        text_edit.setHtml(html)
+        text_edit.setStyleSheet(f"QTextEdit{{font-family:{CHINESE_FONTS};font-size:14px;color:#333;background:white;border:none;}}")
+        text_edit.setMinimumHeight(min_height)
+        self.content_layout.addWidget(text_edit)
+    
+    def clear_content(self):
+        while self.content_layout.count():
+            item = self.content_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+    
+    def get_content_layout(self):
+        return self.content_layout
 
 
 class CharacterDictionary(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.media_player = QMediaPlayer()
-        self.variant_pixmaps = []
+        self.current_char, self.current_code = "", ""
+        self.variant_boxes, self.selected_variant_box = [], None
+        self.chinese_font = get_available_font()
         self.initUI()
-        self.play_startup_music()
     
     def initUI(self):
-        """Initialize the UI"""
         self.setWindowTitle('Chinese Character Dictionary')
-        self.setGeometry(100, 100, 539, 700)
-        
-        # Set background image
-        # self.set_background_image(r'E:\Benkyute Kudasai\Chinese\Building-a-dictionary-of-Chinese-variants\resources\background.jpg')
-        
-        # Apply styling
-        self.apply_style()
-        
-        # Create main widget
+        self.setGeometry(100, 100, 1000, 900)
         main_widget = QWidget()
         self.setCentralWidget(main_widget)
-        
-        # Main layout
-        main_layout = QVBoxLayout()
-        main_layout.setContentsMargins(30, 30, 30, 30)
-        main_layout.setSpacing(15)
-        
-        # Header
-        header = self.create_header()
-        main_layout.addWidget(header)
-        
-        # Input section
-        input_section = self.create_input_section()
-        main_layout.addWidget(input_section)
-        
-        # Result section
-        result_section = self.create_result_section()
-        main_layout.addWidget(result_section)
-        
-        # Footer
-        footer = self.create_footer()
-        main_layout.addWidget(footer)
-        
-        main_layout.addStretch()
-        main_widget.setLayout(main_layout)
-    
-    def set_background_image(self, image_path):
-        """Set background image"""
-        if os.path.exists(image_path):
-            # Convert backslashes to forward slashes for stylesheet
-            image_path_fixed = image_path.replace('\\', '/')
-            stylesheet = f"""
-                QMainWindow {{
-                    background-image: url('{image_path_fixed}');
-                    background-position: center;
-                    background-repeat: no-repeat;
-                    background-attachment: fixed;
-                    background-color: #F5F5DC;
-                }}
-            """
-            self.setStyleSheet(stylesheet)
-        # else:
-        #     print(f"Background image not found at: {image_path}")
-        #     stylesheet = """
-        #         QMainWindow {
-        #             background-color: #F5F5DC;
-        #         }
-        #     """
-            self.setStyleSheet(stylesheet)
-        
-    def apply_style(self):
-        
-        image_path = r'resources\—Slidesdocs—simple chinese style border landscape_726a0d6c60.jpg'
-        image_path_fixed = image_path.replace('\\', '/')
-        
-        style = f"""
-            QMainWindow {{
-                background-image: url('{image_path_fixed}');
-                background-position: center;
-                background-repeat: no-repeat;
-                background-attachment: fixed;
-                background-color: #F5F5DC;
-            }}
-            
-            QLabel {{
-                color: #2F4F4F;
-            }}
-            
-            QLabel#title {{
-                color: #8B0000;
-                font-size: 28px;
-                font-weight: bold;
-            }}
-            
-            QLabel#subtitle {{
-                color: #A0522D;
-                font-size: 12px;
-            }}
-            
-            QLineEdit {{
-                background-color: #FFFACD;
-                color: #2F4F4F;
-                border: 2px solid #8B4513;
-                border-radius: 5px;
-                padding: 10px;
-                font-size: 20px;
-            }}
-            
-            QLineEdit:focus {{
-                border: 2px solid #DC143C;
-                background-color: #FFFEF0;
-            }}
-            
-            QPushButton {{
-                background-color: #8B0000;
-                color: #FFFACD;
-                border: none;
-                border-radius: 5px;
-                padding: 10px 20px;
-                font-weight: bold;
-            }}
-            
-            QPushButton:hover {{
-                background-color: #DC143C;
-            }}
-            
-            QPushButton:pressed {{
-                background-color: #660000;
-            }}
-            
-            QPushButton#secondary {{
-                background-color: #4A708B;
-            }}
-            
-            QPushButton#secondary:hover {{
-                background-color: #5A8FA0;
-            }}
-            
-            QFrame {{
-                border: 2px solid #8B4513;
-                border-radius: 5px;
-                background-color: rgba(255, 250, 205, 0.9);
-            }}
-            
-            QFrame#header {{
-                border: none;
-                background-color: transparent;
-            }}
-            
-            QFrame#title {{
-                border: none;
-                background-color: transparent;
-            }}
-            
-            QFrame#label {{
-                border: none;
-                background-color: transparent;
-            }}
-            
-            QScrollArea {{
-                border: 1px solid #8B4513;
-                background-color: #FFFACD;
-            }}
-        """
-        self.setStyleSheet(style)
-            
-    
-    def create_header(self):
-        """Create simple header without frame"""
-        header_layout = QVBoxLayout()
-        header_layout.setContentsMargins(0, 15, 0, 15)
-        header_layout.setSpacing(5)
-        
-        title = QLabel('Chinese Character Dictionary')
-        title.setObjectName("title")
-        title.setAlignment(Qt.AlignCenter)
-        header_layout.addWidget(title)
-        
-        header_widget = QWidget()
-        header_widget.setLayout(header_layout)
-        return header_widget
-    
-    def create_input_section(self):
-        """Create input section"""
-        input_frame = QFrame()
-        input_layout = QVBoxLayout()
-        input_layout.setContentsMargins(15, 15, 15, 15)
-        input_layout.setSpacing(10)
-        
-        label = QLabel('Enter a Chinese character:')
-        label.setObjectName("label")
-        label.setFont(QFont('Arial', 12))
-        input_layout.addWidget(label)
-        
-        self.entry = QLineEdit()
-        self.entry.setPlaceholderText('Type one character...')
-        self.entry.setAlignment(Qt.AlignCenter)
-        self.entry.setMaxLength(1)
-        self.entry.returnPressed.connect(self.search_variants)
-        self.entry.setFocus()
-        input_layout.addWidget(self.entry)
-        
-        button_layout = QHBoxLayout()
-        button_layout.addStretch()
-        
-        search_btn = QPushButton('Search')
-        search_btn.clicked.connect(self.search_variants)
-        button_layout.addWidget(search_btn)
-        
-        clear_btn = QPushButton('Clear')
-        clear_btn.setObjectName("secondary")
-        clear_btn.clicked.connect(self.clear_input)
-        button_layout.addWidget(clear_btn)
-        
-        button_layout.addStretch()
-        input_layout.addLayout(button_layout)
-        
-        input_frame.setLayout(input_layout)
-        return input_frame
-    
-    def create_result_section(self):
-        """Create result display section"""
-        result_frame = QFrame()
-        result_layout = QVBoxLayout()
-        result_layout.setContentsMargins(15, 15, 15, 15)
-        result_layout.setSpacing(10)
-        
-        variants_label = QLabel('Text Variants:')
-        variants_label.setObjectName("label")
-        variants_label.setFont(QFont('Arial', 11, QFont.Bold))
-        result_layout.addWidget(variants_label)
-        
-        self.result_label = QLabel('')
-        result_font = QFont('TW-MOE-Std-Kai', 18)
-        self.result_label.setFont(result_font)
-        self.result_label.setAlignment(Qt.AlignCenter)
-        self.result_label.setWordWrap(True)
-        self.result_label.setMinimumHeight(50)
-        self.result_label.setStyleSheet("color: #8B0000;")
-        result_layout.addWidget(self.result_label)
-        
-        images_label = QLabel('Image Variants:')
-        images_label.setObjectName("label")
-        images_label.setFont(QFont('Arial', 11, QFont.Bold))
-        result_layout.addWidget(images_label)
-        
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
-        scroll.setMinimumHeight(80)  # Smaller scroll area for small images
-        scroll.setMaximumHeight(120)
+        scroll.setStyleSheet("QScrollArea{border:none;}")
+        content_widget = QWidget()
+        content_layout = QVBoxLayout()
+        content_layout.setContentsMargins(20, 20, 20, 20)
+        content_layout.setSpacing(0)
         
-        # Container for images with center alignment
-        self.img_container = QWidget()
-        self.img_layout = QHBoxLayout()
-        self.img_layout.setContentsMargins(5, 5, 5, 5)
-        self.img_layout.setSpacing(10)
-        self.img_layout.addStretch()  # Add stretch at start
-        self.img_container.setLayout(self.img_layout)
+        # Header
+        header = QFrame()
+        h_layout = QHBoxLayout()
+        self.code_label = QLabel("")
+        self.code_label.setStyleSheet("font-size:18px;font-weight:bold;color:#333;")
+        h_layout.addWidget(self.code_label)
+        self.main_char_label = QLabel("")
+        self.main_char_label.setStyleSheet(f"font-size:48px;color:#8B0000;font-family:{CHINESE_FONTS};")
+        h_layout.addWidget(self.main_char_label)
+        self.stroke_label = QLabel("")
+        self.stroke_label.setStyleSheet("font-size:14px;color:#666;")
+        h_layout.addWidget(self.stroke_label)
+        h_layout.addStretch()
+        header.setLayout(h_layout)
+        content_layout.addWidget(header)
+        content_layout.addSpacing(20)
         
-        scroll.setWidget(self.img_container)
+        # Input section
+        input_frame = QFrame()
+        input_frame.setStyleSheet("QFrame{background:white;border:1px solid #DDD;border-radius:5px;}")
+        i_layout = QHBoxLayout()
+        i_layout.setContentsMargins(15, 10, 15, 10)
+        i_layout.addWidget(QLabel("Enter Character:"))
+        self.entry = QLineEdit()
+        self.entry.setPlaceholderText("Type one character...")
+        self.entry.setMaxLength(1)
+        self.entry.setFixedWidth(150)
+        self.entry.setStyleSheet(f"QLineEdit{{font-family:{CHINESE_FONTS};font-size:24px;padding:5px;border:2px solid #8B0000;border-radius:5px;}}")
+        self.entry.returnPressed.connect(self.search_character)
+        i_layout.addWidget(self.entry)
+        search_btn = QPushButton("Search")
+        search_btn.setStyleSheet("QPushButton{background:#8B0000;color:white;border:none;border-radius:5px;padding:8px 20px;font-weight:bold;}")
+        search_btn.clicked.connect(self.search_character)
+        i_layout.addWidget(search_btn)
+        clear_btn = QPushButton("Clear")
+        clear_btn.setStyleSheet("QPushButton{background:#666;color:white;border:none;border-radius:5px;padding:8px 20px;}")
+        clear_btn.clicked.connect(self.clear_all)
+        i_layout.addWidget(clear_btn)
+        i_layout.addStretch()
+        input_frame.setLayout(i_layout)
+        content_layout.addWidget(input_frame)
+        content_layout.addSpacing(15)
         
-        result_layout.addWidget(scroll)
-        result_frame.setLayout(result_layout)
-        return result_frame
+        # Variants section
+        content_layout.addWidget(SectionHeader("Variants"))
+        self.variants_container = QFrame()
+        self.variants_container.setStyleSheet("QFrame{background:#F8F8F5;border:1px solid #DDD;border-top:none;}")
+        self.variants_scroll = QScrollArea()
+        self.variants_scroll.setWidgetResizable(True)
+        self.variants_scroll.setFixedHeight(100)
+        self.variants_scroll.setStyleSheet("QScrollArea{border:none;background:transparent;}")
+        self.variants_widget = QWidget()
+        self.variants_layout = QHBoxLayout()
+        self.variants_layout.setContentsMargins(15, 10, 15, 10)
+        self.variants_layout.setSpacing(8)
+        self.variants_layout.setAlignment(Qt.AlignLeft)
+        self.variants_widget.setLayout(self.variants_layout)
+        self.variants_scroll.setWidget(self.variants_widget)
+        c_layout = QVBoxLayout()
+        c_layout.setContentsMargins(0, 0, 0, 0)
+        c_layout.addWidget(self.variants_scroll)
+        self.variants_container.setLayout(c_layout)
+        content_layout.addWidget(self.variants_container)
+        content_layout.addSpacing(15)
+        
+        # Description section
+        content_layout.addWidget(SectionHeader("Description"))
+        self.rows = [TableRow(l, i==5) for i, l in enumerate(["Standard\nCharacter", "Shuowen\nEtymology", "Character\nStyle", "Zhuyin", "Hanyu\nPinyin", "Definition"])]
+        for row in self.rows:
+            content_layout.addWidget(row)
+        content_layout.addStretch()
+        
+        content_widget.setLayout(content_layout)
+        scroll.setWidget(content_widget)
+        main_layout = QVBoxLayout()
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.addWidget(scroll)
+        main_widget.setLayout(main_layout)
     
-    def create_footer(self):
-        """Create footer with controls"""
-        footer_frame = QFrame()
-        footer_layout = QHBoxLayout()
-        footer_layout.setContentsMargins(15, 10, 15, 10)
-        
-        # info_label = QLabel('Chinese Character Dictionary | School Project 2024')
-        # info_label.setStyleSheet("color: #8B4513; font-size: 9px;")
-        # footer_layout.addWidget(info_label)
-        
-        footer_layout.addStretch()
-        
-        self.music_btn = QPushButton('🔊 Music')
-        self.music_btn.setObjectName("secondary")
-        self.music_btn.setMaximumWidth(80)
-        self.music_btn.clicked.connect(self.toggle_music)
-        footer_layout.addWidget(self.music_btn)
-        
-        exit_btn = QPushButton('Exit')
-        exit_btn.setObjectName("secondary")
-        exit_btn.setMaximumWidth(60)
-        exit_btn.clicked.connect(self.close)
-        footer_layout.addWidget(exit_btn)
-        
-        footer_frame.setLayout(footer_layout)
-        return footer_frame
+    def on_variant_clicked(self, box):
+        if self.selected_variant_box:
+            self.selected_variant_box.set_selected(False)
+        box.set_selected(True)
+        self.selected_variant_box = box
     
-    def search_variants(self):
-        """Search for character variants"""
+    def clear_variants_display(self):
+        for box in self.variant_boxes:
+            box.clicked.disconnect()
+            box.deleteLater()
+        self.variant_boxes.clear()
+        self.selected_variant_box = None
+    
+    def update_variants_display(self, char):
+        self.clear_variants_display()
+        variants = get_variants(char)
+        if not variants:
+            self.variants_layout.addWidget(QLabel("No variants found"))
+            return
+        for variant_code, variant_char, img_path in variants:
+            suffix = f".{variant_code.split('-')[-1]}" if variant_code and '-' in variant_code else ""
+            box = VariantCharacterBox((variant_char or "").strip(), suffix, (img_path or "").strip())
+            box.clicked.connect(self.on_variant_clicked)
+            self.variants_layout.addWidget(box)
+            self.variant_boxes.append(box)
+        self.variants_layout.addStretch()
+    
+    def search_character(self):
         char = self.entry.text().strip()
-        
         if not char:
             QMessageBox.warning(self, "Input Error", "Please enter a character.")
             return
-        
-        self.result_label.setText('')
-        self.variant_pixmaps.clear()
-        
-        # Clear old images
-        while self.img_layout.count() > 1:
-            item = self.img_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-        
-        variants = get_variants(char)
-        
-        if not variants:
-            QMessageBox.information(self, "Not Found", f"No variants found for '{char}'.")
+        char_info = get_character_info(char)
+        if not char_info:
+            QMessageBox.information(self, "Not Found", f"No information found for '{char}'.")
             return
-        
-        text_only = [v for v, path in variants if v and not path]
-        if text_only:
-            self.result_label.setText(', '.join(text_only))
-        
-        image_count = 0
-        for _, path in variants:
-            if path and os.path.exists(path):
-                try:
-                    pixmap = QPixmap(path)
-                    if not pixmap.isNull():
-                        # Keep 45x45 size, no scaling needed
-                        self.variant_pixmaps.append(pixmap)
-                        
-                        img_label = QLabel()
-                        img_label.setPixmap(pixmap)
-                        img_label.setFixedSize(45, 45)  # Add padding around image
-                        img_label.setAlignment(Qt.AlignCenter)
-                        img_label.setStyleSheet("""
-                            border: 1px solid #8B4513;
-                            padding: 5px;
-                            background-color: #FFFACD;
-                        """)
-                        self.img_layout.insertWidget(image_count, img_label)
-                        image_count += 1
-                except Exception as e:
-                    print(f"Error loading image: {e}")
-        
-        # Add stretch at the end for centering
-        self.img_layout.addStretch()
+        code, main_char = char_info
+        self.current_char, self.current_code = main_char, code
+        self.code_label.setText(code)
+        self.main_char_label.setText(main_char)
+        self.stroke_label.setText("--05-06")
+        self.update_variants_display(char)
+        description = get_character_description(char)
+        if not description:
+            for row in self.rows:
+                row.clear_content()
+            return
+        standard_char, shuowen, char_style, zhuyin, pinyin, definition = description
+        data = [
+            (f"[{code}] {main_char} --05-06", "18px", None),
+            (shuowen, None, "shuowen"),
+            (char_style, None, "style"),
+            (zhuyin, "24px", None),
+            (pinyin, "16px", None),
+            (definition, None, "definition")
+        ]
+        for i, (text, font_size, section) in enumerate(data):
+            self.rows[i].clear_content()
+            if section:
+                self.rows[i].set_html_content(format_text_with_images(text or "", section), 80 if section != "definition" else 200)
+            else:
+                lbl = QLabel(text or "No data")
+                lbl.setStyleSheet(f"font-family:{CHINESE_FONTS};font-size:{font_size or '14px'};color:#333;background:transparent;border:none;")
+                self.rows[i].get_content_layout().addWidget(lbl)
     
-    def clear_input(self):
-        """Clear all inputs and results"""
+    def clear_all(self):
         self.entry.clear()
-        self.result_label.setText('')
-        self.variant_pixmaps.clear()
-        for w in self.img_container.findChildren(QLabel):
-            w.deleteLater()
+        self.code_label.setText("")
+        self.main_char_label.setText("")
+        self.stroke_label.setText("")
+        for row in self.rows:
+            row.clear_content()
+        self.clear_variants_display()
         self.entry.setFocus()
-    
-    def play_startup_music(self):
-        """Play startup music on app launch"""
-        music_file = r'E:\Benkyute Kudasai\Chinese\Building-a-dictionary-of-Chinese-variants\resources\China famous funny sound effect.mp3'
-        
-        if os.path.exists(music_file):
-            try:
-                media_content = QMediaContent(QUrl.fromLocalFile(music_file))
-                self.media_player.setMedia(media_content)
-                # self.media_player.play()
-            except Exception as e:
-                print(f"Could not load music: {e}")
-    
-    def toggle_music(self):
-        """Toggle music on/off"""
-        if self.media_player.state() == QMediaPlayer.PlayingState:
-            self.media_player.pause()
-            self.music_btn.setText('🔇 Music')
-        else:
-            self.media_player.play()
-            self.music_btn.setText('🔊 Music')
-
-
-def main():
-    app = QApplication(sys.argv)
-    window = CharacterDictionary()
-    window.show()
-    sys.exit(app.exec_())
 
 
 if __name__ == '__main__':
-    main()
+    app = QApplication(sys.argv)
+    app.setStyle('Fusion')
+    window = CharacterDictionary()
+    window.show()
+    sys.exit(app.exec_())
