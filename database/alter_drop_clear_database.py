@@ -9,7 +9,7 @@ cur = conn.cursor()
 # cur.execute("DROP TABLE variants;")
 # cur.execute("DROP TABLE variant_details;")
 # cur.execute("DROP TABLE appendix_details;")
-cur.execute("DROP TABLE supplementary_chars;")
+cur.execute("DROP TABLE search_results;")
 # cur.execute("DROP TABLE descriptions;")
 conn.commit()
 
