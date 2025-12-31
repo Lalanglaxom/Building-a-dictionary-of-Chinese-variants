@@ -18,7 +18,7 @@ class WoffGridTester(QMainWindow):
         # ======================================================================
 
         # ### STEP 1: Type the character you want to test here.
-        CHAR_TO_TEST = "󷂱"
+        CHAR_TO_TEST = "󶗊"
 
         # ======================================================================
         # ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲   END OF EDITING   ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲

@@ -48,7 +48,9 @@ async def process_database():
 
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
-    cur.execute("SELECT detail_url FROM summary ORDER BY rowid DESC")
+    # cur.execute("SELECT detail_url FROM summary ORDER BY rowid DESC")
+    # Order by newest first, skip the first 1300, then take everything else
+    cur.execute("SELECT detail_url FROM summary ORDER BY rowid DESC LIMIT -1 OFFSET 1300")
     urls = [row[0] for row in cur.fetchall()]
     conn.close()
 
