@@ -5,36 +5,94 @@ import re
 
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                              QHBoxLayout, QLabel, QLineEdit, QPushButton, 
-                             QFrame, QScrollArea, QMessageBox, QTextEdit, QDialog)
-from PyQt5.QtGui import QFont, QPixmap, QCursor, QFontDatabase
+                             QFrame, QScrollArea, QMessageBox, QTextEdit, QDialog,
+                             QTabWidget, QGridLayout)
+from PyQt5.QtGui import QPixmap, QCursor
 from PyQt5.QtCore import Qt, pyqtSignal, QUrl
 from PyQt5.QtWebEngineWidgets import QWebEngineView
 
+# Try to import fontTools
+try:
+    from fontTools.ttLib import TTFont
+    HAS_FONTTOOLS = True
+except ImportError:
+    HAS_FONTTOOLS = False
+    print("WARNING: 'fonttools' not found. Install with: pip install fonttools")
+
 # ═══════════════════════════════════════════════════════════════════════════
-# 1. CONFIGURATION
+# 1. CONFIGURATION & FONT MANAGER
 # ═══════════════════════════════════════════════════════════════════════════
 
 DB = "dictionary.db"
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 FONT_DIR = os.path.join(SCRIPT_DIR, "fonts")
+DEFAULT_FONTS = "sans-serif, 'Microsoft YaHei', 'SimSun'"
 
-# Fallback fonts for UI elements (Standard fonts)
-CHINESE_FALLBACK_FONTS = "'TW-Sung-Plus', 'SimSun', 'Microsoft YaHei', sans-serif"
+class FontManager:
+    def __init__(self):
+        self.css_rules = []
+        self.font_families = []
+        self.char_map = {}
+        self.scan_fonts()
+
+    def scan_fonts(self):
+        if not os.path.exists(FONT_DIR):
+            os.makedirs(FONT_DIR)
+            return
+
+        files = sorted([f for f in os.listdir(FONT_DIR) if f.lower().endswith(('.woff', '.ttf'))])
+        
+        for filename in files:
+            file_path = os.path.join(FONT_DIR, filename).replace('\\', '/')
+            safe_name = filename.replace(".", "_").replace("-", "_")
+            family_name = f"Font_{safe_name}"
+            
+            rule = f"@font-face {{ font-family: '{family_name}'; src: url('file:///{file_path}'); }}"
+            self.css_rules.append(rule)
+            self.font_families.append(f"'{family_name}'")
+
+            if HAS_FONTTOOLS:
+                full_path = os.path.join(FONT_DIR, filename)
+                try:
+                    tt = TTFont(full_path)
+                    cmap = tt.getBestCmap()
+                    if cmap:
+                        for char_code in cmap:
+                            if char_code not in self.char_map:
+                                self.char_map[char_code] = {
+                                    'file': filename,
+                                    'family': family_name,
+                                    'path': file_path
+                                }
+                    tt.close()
+                except Exception as e:
+                    print(f"Error reading font {filename}: {e}")
+
+    def get_font_data_for_char(self, char_str):
+        if not char_str:
+            return "", DEFAULT_FONTS
+
+        if HAS_FONTTOOLS and char_str:
+            code_point = ord(char_str[0])
+            if code_point in self.char_map:
+                data = self.char_map[code_point]
+                css = f"@font-face {{ font-family: '{data['family']}'; src: url('file:///{data['path']}'); }}"
+                stack = f"'{data['family']}', {DEFAULT_FONTS}"
+                return css, stack
+        
+        full_css = "".join(self.css_rules)
+        full_stack = ", ".join(self.font_families) + ", " + DEFAULT_FONTS
+        return full_css, full_stack
+
+font_manager = FontManager()
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 2. HELPER FUNCTIONS
+# 2. DATABASE FUNCTIONS
 # ═══════════════════════════════════════════════════════════════════════════
 
 def normalize_char(char):
     if not char: return ""
-    try:
-        char.encode('utf-8')
-        return char
-    except UnicodeEncodeError:
-        try:
-            return char.encode('utf-16', 'surrogatepass').decode('utf-16')
-        except:
-            return char
+    return char
 
 def resolve_image_path(img_path):
     if not img_path: return None
@@ -44,8 +102,9 @@ def resolve_image_path(img_path):
     if os.path.exists(full_path): return full_path
     return None
 
-def format_text_with_images(text, section_type="default"):
+def format_text_with_images(text, section_type="default", extra_css="", font_stack=DEFAULT_FONTS):
     if not text: return ""
+    
     def replace_image(match):
         img_path = match.group(1).strip()
         resolved_path = resolve_image_path(img_path)
@@ -54,25 +113,88 @@ def format_text_with_images(text, section_type="default"):
             return f'<img src="file:///{clean_path}" style="max-height: 28px; vertical-align: middle; margin: 0 2px;">'
         return f'[img:{img_path}]'
     
-    text = re.sub(r'img:([^$$]*?\.png)\]', replace_image, text)
+    text = re.sub(r'img:([^$]*?\.png)\]', replace_image, text)
     if section_type == "definition":
         text = re.sub(r'(?<!^)(\d+\.)\s*', r'<br><br>\1 ', text)
     
     text = text.replace('\n', '<br>')
-    return f'<html><body style="font-family:{CHINESE_FALLBACK_FONTS};font-size:14px;line-height:1.9;margin:0;padding:5px;">{text}</body></html>'
+    
+    return f"""
+    <html>
+    <head>
+        <style>
+            {extra_css}
+            body {{
+                font-family: {font_stack};
+                font-size: 14px;
+                line-height: 1.9;
+                margin: 0;
+                padding: 5px;
+                color: #333;
+            }}
+        </style>
+    </head>
+    <body>{text}</body>
+    </html>
+    """
 
-# ═══════════════════════════════════════════════════════════════════════════
-# 3. DATABASE FUNCTIONS
-# ═══════════════════════════════════════════════════════════════════════════
+def extract_code_from_text(full_text):
+    match = re.search(r'([A-Z]\d{5}-\d{3})', full_text)
+    if match:
+        return match.group(1)
+    return None
+
+def get_search_results(search_char):
+    """Get search results for a character"""
+    conn = sqlite3.connect(DB)
+    cur = conn.cursor()
+    
+    cur.execute("""
+        SELECT result_char, result_code, ucs_code, radical_stroke, detail_url, data_sn, icon_label
+        FROM search_results
+        WHERE search_char = ? AND result_type = 'Text'
+        ORDER BY result_code
+    """, (search_char,))
+    text_results = cur.fetchall()
+    
+    # FIXED: Explicitly select 'id' as the last column for robust linking
+    cur.execute("""
+        SELECT result_char, icon_label, ucs_code, radical_stroke, detail_url, anchor_id, id
+        FROM search_results
+        WHERE search_char = ? AND result_type = 'Appendix'
+        ORDER BY icon_label
+    """, (search_char,))
+    appendix_results = cur.fetchall()
+    
+    conn.close()
+    return text_results, appendix_results
+    
+    conn.close()
+    return text_results, appendix_results
 
 def get_character_info(char):
-    char = normalize_char(char)
     conn = sqlite3.connect(DB)
     cur = conn.cursor()
     cur.execute("SELECT code, char FROM summary WHERE char=?;", (char,))
     row = cur.fetchone()
     conn.close()
     return row
+
+def get_character_by_code(code):
+    conn = sqlite3.connect(DB)
+    cur = conn.cursor()
+    cur.execute("SELECT code, char FROM summary WHERE code=?;", (code,))
+    row = cur.fetchone()
+    conn.close()
+    return row
+
+def find_main_code_from_variant(code):
+    conn = sqlite3.connect(DB)
+    cur = conn.cursor()
+    cur.execute("SELECT main_code FROM variants WHERE variant_code=?;", (code,))
+    row = cur.fetchone()
+    conn.close()
+    return row[0] if row else None
 
 def get_character_description(char):
     char = normalize_char(char)
@@ -114,161 +236,138 @@ def get_variant_details(variant_code):
     conn.close()
     return row
 
+def get_appendix_info(search_res_id):
+    """
+    Fetch details for the appendix entry.
+    FIXED: Queries by 'search_result_id' (Foreign Key) to ensure correct matching.
+    """
+    conn = sqlite3.connect(DB)
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT result_char, icon_label, char_form, radical_stroke, pronunciation, 
+               examples_or_notes, char_code, surname_single, surname_compound, surname_double
+        FROM appendix_details
+        WHERE search_result_id = ? 
+    """, (search_res_id,))
+    row = cur.fetchone()
+    conn.close()
+    return row
+
 # ═══════════════════════════════════════════════════════════════════════════
-# 4. CUSTOM UI WIDGETS
+# 3. SEARCH RESULT BOX
 # ═══════════════════════════════════════════════════════════════════════════
 
-class MainCharWebWidget(QWebEngineView):
-    """
-    A specialized Web Widget to display the Main Character.
-    It calculates EXACTLY which uXXXX.ttf file is needed and loads ONLY that one.
-    """
-    def __init__(self, parent=None):
+class SearchResultBox(QFrame):
+    clicked = pyqtSignal(str, str) 
+    
+    def __init__(self, alter_char="", char="", bottom_label="", ucs_code="", icon_label="", full_text="", parent=None):
         super().__init__(parent)
-        self.page().setBackgroundColor(Qt.transparent)
-        self.setFixedSize(140, 140)  # Increased size slightly
+        self.alter_char = char
+        self.char = alter_char
+        self.bottom_label = bottom_label
+        self.ucs_code = ucs_code
+        self.icon_label = icon_label
+        self.full_text = full_text
         
-    def load_char(self, char):
-        """Generates HTML with a targeted font injection"""
+        self.setFixedSize(100, 110)
+        self.setCursor(QCursor(Qt.PointingHandCursor))
         
-        # 1. Determine the Code Point
-        code_point = ord(char[0])
+        layout = QVBoxLayout()
+        layout.setContentsMargins(5, 5, 5, 5)
+        layout.setSpacing(2)
         
-        # 2. Calculate the 'floor' (start of the 256-char block)
-        # e.g. 0x6123 -> 0x6100
-        start_hex_int = code_point - (code_point % 0x100)
-        filename_prefix = f"u{start_hex_int:x}".lower()
+        # Character display
+        self.char_view = QWebEngineView()
+        self.char_view.setFixedSize(90, 70)
+        self.char_view.page().setBackgroundColor(Qt.white)
+        self.char_view.setAttribute(Qt.WA_TransparentForMouseEvents)
         
-        # 3. Find the file (check .woff then .ttf)
-        font_file = None
-        for ext in ['.woff', '.ttf']:
-            candidate = f"{filename_prefix}{ext}"
-            if os.path.exists(os.path.join(FONT_DIR, candidate)):
-                font_file = candidate
-                break
-        
-        css_rule = ""
-        font_family = CHINESE_FALLBACK_FONTS
-        
-        # 4. If we found the specific file, inject it!
-        if font_file:
-            path = os.path.join(FONT_DIR, font_file).replace('\\', '/')
-            css_rule = f"""
-                @font-face {{
-                    font-family: 'TargetCharFont';
-                    src: url('file:///{path}');
-                }}
-            """
-            font_family = "'TargetCharFont', " + CHINESE_FALLBACK_FONTS
-            print(f"DEBUG: Loading specific font file: {font_file}") # Debug print
-        else:
-            print(f"DEBUG: Font file not found for {char} (Expected {filename_prefix})")
-
-        html = f"""
-        <!DOCTYPE html>
+        custom_css, font_stack = font_manager.get_font_data_for_char(char)
+        char_html = f"""
         <html>
         <head>
             <style>
-                {css_rule}
-                
+                {custom_css}
+                html, body {{
+                    margin: 0; padding: 0;
+                    width: 100%; height: 100%;
+                    background: white;
+                    overflow: hidden;
+                }}
                 body {{
-                    background-color: transparent;
-                    margin: 0;
                     display: flex;
                     justify-content: center;
                     align-items: center;
-                    height: 100vh;
-                    overflow: hidden;
+                    position: relative;
                 }}
-                .big-char {{
-                    font-family: {font_family};
-                    font-size: 100px; /* Increased Size */
-                    color: #8B0000;
+                .char {{
+                    font-family: {font_stack};
+                    font-size: 48px;
+                    color: #333;
+                    line-height: 1;
+                }}
+                /* FIXED: Icon position at bottom left of the char box */
+                .icon {{
+                    position: absolute;
+                    bottom: 0px;
+                    left: 0px;
+                    background: #8B0000;
+                    color: white;
+                    font-size: 10px;
+                    padding: 2px 5px;
+                    border-top-right-radius: 4px;
                     font-weight: bold;
                     line-height: 1;
                 }}
             </style>
         </head>
         <body>
-            <div class="big-char">{char}</div>
+            <div class="char">{alter_char}</div>
+            {f'<div class="icon">{icon_label}</div>' if icon_label else ''}
         </body>
         </html>
         """
-        self.setHtml(html, QUrl.fromLocalFile(SCRIPT_DIR))
-
-
-class VariantCharacterBox(QFrame):
-    """Clickable box for variants - Now Bigger!"""
-    clicked = pyqtSignal(object)
-    
-    def __init__(self, char="", code="", img_path="", variant_code="", parent=None):
-        super().__init__(parent)
-        self.char = char
-        self.code = code
-        self.variant_code = variant_code
-        self.is_selected = False
+        self.char_view.setHtml(char_html, QUrl.fromLocalFile(SCRIPT_DIR))
+        layout.addWidget(self.char_view, 1)
         
-        # INCREASED SIZE: From 70x75 -> 80x90
-        self.setFixedSize(80, 90)
-        self.setCursor(QCursor(Qt.PointingHandCursor))
+        # Bottom label
+        self.label = QLabel(bottom_label)
+        self.label.setAlignment(Qt.AlignCenter)
+        self.label.setStyleSheet("""
+            QLabel {
+                background: transparent;
+                color: #555;
+                font-size: 11px;
+                font-weight: bold;
+                padding: 0px;
+            }
+        """)
+        self.label.setFixedHeight(20)
+        layout.addWidget(self.label)
         
-        layout = QVBoxLayout()
-        layout.setContentsMargins(2, 2, 2, 2)
-        layout.setSpacing(0)
-        
-        # Top Code Label
-        self.code_label = QLabel(code)
-        self.code_label.setAlignment(Qt.AlignCenter)
-        self.code_label.setFixedHeight(15)
-        self.code_label.setStyleSheet("color:#666;font-size:10px;")
-        layout.addWidget(self.code_label)
-        
-        # Character or Image Display
-        resolved_img_path = resolve_image_path(img_path) if img_path else None
-        self.char_label = QLabel()
-        self.char_label.setAlignment(Qt.AlignCenter)
-        
-        if resolved_img_path:
-            pixmap = QPixmap(resolved_img_path)
-            if not pixmap.isNull():
-                # INCREASED ICON SIZE: From 50x50 -> 64x64
-                self.char_label.setPixmap(pixmap.scaled(64, 64, Qt.KeepAspectRatio, Qt.SmoothTransformation))
-            else:
-                self.char_label.setText(char or "?")
-                self.char_label.setStyleSheet(f"font-family:{CHINESE_FALLBACK_FONTS};font-size:36px;")
-            self.is_image = True
-        else:
-            self.char_label.setText(char or "")
-            # INCREASED FONT SIZE: From 26px -> 36px
-            self.char_label.setStyleSheet(f"font-family:{CHINESE_FALLBACK_FONTS};font-size:36px;color:#333;")
-            self.is_image = False
-        
-        layout.addWidget(self.char_label, 1)
         self.setLayout(layout)
-        self.update_style()
-    
-    def update_style(self):
-        if self.is_selected:
-            self.setStyleSheet("VariantCharacterBox{background:#8B0000;border:2px solid #600000;}")
-            self.code_label.setStyleSheet("color:white;background:transparent;border:none;font-size:10px;")
-            style_color = "transparent" if self.is_image else "white"
-            self.char_label.setStyleSheet(f"color:{style_color};background:transparent;border:none;font-size:36px;font-family:{CHINESE_FALLBACK_FONTS};")
-        else:
-            self.setStyleSheet("VariantCharacterBox{background:white;border:1px solid #999;}VariantCharacterBox:hover{border:2px solid #8B0000;}")
-            self.code_label.setStyleSheet("color:#666;background:transparent;border:none;font-size:10px;")
-            self.char_label.setStyleSheet(f"color:#333;background:transparent;border:none;font-size:36px;font-family:{CHINESE_FALLBACK_FONTS};")
-    
-    def set_selected(self, selected):
-        self.is_selected = selected
-        self.update_style()
+        self.setStyleSheet("""
+            SearchResultBox {
+                background: white;
+                border: 2px solid #DDD;
+                border-radius: 5px;
+            }
+            SearchResultBox:hover {
+                border: 2px solid #8B0000;
+                background: #FFF8F8;
+            }
+        """)
+        
+        if ucs_code:
+            self.setToolTip(f"{char}\n{ucs_code}")
     
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
-            self.clicked.emit(self)
+            self.clicked.emit(self.full_text, self.ucs_code)
         super().mousePressEvent(event)
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 5. REMAINING UI (Headers, Tables, Detail Window) - Unchanged but Included
+# 4. WINDOW CLASSES
 # ═══════════════════════════════════════════════════════════════════════════
 
 class SectionHeader(QFrame):
@@ -295,54 +394,157 @@ class TableRow(QFrame):
         main_layout = QVBoxLayout()
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
+        
         if has_top_accent:
             accent = QFrame()
             accent.setFixedHeight(3)
             accent.setStyleSheet("background:#8B0000;border:none;")
             main_layout.addWidget(accent)
+        
         row_widget = QWidget()
         layout = QHBoxLayout()
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
+        
         self.label_frame = QFrame()
-        self.label_frame.setFixedWidth(100)
+        self.label_frame.setFixedWidth(140) # Slightly wider for English text
         self.label_frame.setStyleSheet("QFrame{background:#F5F5F0;border:1px solid #CCC;border-right:none;}")
-        label_layout = QVBoxLayout()
-        label_layout.setContentsMargins(8, 8, 8, 8)
+        l_layout = QVBoxLayout()
+        l_layout.setContentsMargins(8, 8, 8, 8)
         label = QLabel(label_text)
         label.setAlignment(Qt.AlignCenter)
-        label.setStyleSheet("font-size:13px;font-weight:bold;color:#333;background:transparent;border:none;")
+        label.setStyleSheet("font-size:13px;font-weight:bold;color:#333;")
         label.setWordWrap(True)
-        label_layout.addWidget(label)
-        self.label_frame.setLayout(label_layout)
+        l_layout.addWidget(label)
+        self.label_frame.setLayout(l_layout)
         layout.addWidget(self.label_frame)
+        
         self.content_frame = QFrame()
         self.content_frame.setStyleSheet("QFrame{background:white;border:1px solid #CCC;}")
         self.content_layout = QVBoxLayout()
         self.content_layout.setContentsMargins(10, 8, 10, 8)
         self.content_frame.setLayout(self.content_layout)
         layout.addWidget(self.content_frame, 1)
+        
         row_widget.setLayout(layout)
         main_layout.addWidget(row_widget)
         self.setLayout(main_layout)
+
     def set_html_content(self, html, min_height=60):
         self.clear_content()
         text_edit = QTextEdit()
         text_edit.setReadOnly(True)
         text_edit.setHtml(html)
-        text_edit.setStyleSheet(f"QTextEdit{{font-family:{CHINESE_FALLBACK_FONTS};font-size:14px;color:#333;background:white;border:none;}}")
+        text_edit.setStyleSheet("QTextEdit{background:white;border:none;}")
         text_edit.setMinimumHeight(min_height)
         self.content_layout.addWidget(text_edit)
+
     def add_text_label(self, text, size=14):
         lbl = QLabel(text)
-        lbl.setStyleSheet(f"font-family:{CHINESE_FALLBACK_FONTS};font-size:{size}px;color:#333;background:transparent;border:none;")
+        lbl.setStyleSheet(f"font-family:{DEFAULT_FONTS};font-size:{size}px;color:#333;background:transparent;border:none;")
         lbl.setWordWrap(True)
         self.content_layout.addWidget(lbl)
+
     def clear_content(self):
         while self.content_layout.count():
             item = self.content_layout.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
+
+class VariantCharacterBox(QFrame):
+    clicked = pyqtSignal(object)
+    
+    def __init__(self, char="", code="", img_path="", variant_code="", parent=None):
+        super().__init__(parent)
+        self.char = char
+        self.code = code
+        self.variant_code = variant_code
+        self.img_path = img_path
+        self.is_selected = False
+        
+        self.setFixedSize(80, 90)
+        self.setCursor(QCursor(Qt.PointingHandCursor))
+        
+        layout = QVBoxLayout()
+        layout.setContentsMargins(2, 2, 2, 2)
+        layout.setSpacing(0)
+        
+        self.code_label = QLabel(code)
+        self.code_label.setAlignment(Qt.AlignCenter)
+        self.code_label.setFixedHeight(15)
+        self.code_label.setStyleSheet("color:#666;font-size:10px;")
+        layout.addWidget(self.code_label)
+        
+        resolved_img_path = resolve_image_path(img_path) if img_path else None
+        
+        if resolved_img_path:
+            self.is_image = True
+            self.char_widget = QLabel()
+            self.char_widget.setAlignment(Qt.AlignCenter)
+            pixmap = QPixmap(resolved_img_path)
+            if not pixmap.isNull():
+                self.char_widget.setPixmap(pixmap.scaled(64, 64, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            else:
+                self.char_widget.setText("Img Error")
+        else:
+            self.is_image = False
+            self.char_widget = QWebEngineView()
+            self.char_widget.page().setBackgroundColor(Qt.transparent)
+            self.char_widget.setAttribute(Qt.WA_TransparentForMouseEvents)
+            self.render_char_html(text_color="#333")
+
+        layout.addWidget(self.char_widget, 1)
+        self.setLayout(layout)
+        self.update_style()
+    
+    def render_char_html(self, text_color="#333"):
+        if self.is_image: return
+        char_to_show = self.char or ""
+        custom_css, font_family = font_manager.get_font_data_for_char(char_to_show)
+
+        html = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <style>
+                {custom_css}
+                body {{
+                    background: transparent;
+                    margin: 0; padding: 0;
+                    display: flex; justify-content: center; align-items: center;
+                    height: 100vh; overflow: hidden;
+                }}
+                .char {{
+                    font-family: {font_family}; 
+                    font-size: 36px;
+                    color: {text_color};
+                    line-height: 1;
+                }}
+            </style>
+        </head>
+        <body><div class="char">{char_to_show}</div></body>
+        </html>
+        """
+        self.char_widget.setHtml(html, QUrl.fromLocalFile(SCRIPT_DIR))
+
+    def update_style(self):
+        if self.is_selected:
+            self.setStyleSheet("VariantCharacterBox{background:#8B0000;border:2px solid #600000;}")
+            self.code_label.setStyleSheet("color:white;background:transparent;border:none;font-size:10px;")
+            if not self.is_image: self.render_char_html(text_color="white")
+        else:
+            self.setStyleSheet("VariantCharacterBox{background:white;border:1px solid #999;}VariantCharacterBox:hover{border:2px solid #8B0000;}")
+            self.code_label.setStyleSheet("color:#666;background:transparent;border:none;font-size:10px;")
+            if not self.is_image: self.render_char_html(text_color="#333")
+    
+    def set_selected(self, selected):
+        self.is_selected = selected
+        self.update_style()
+    
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.clicked.emit(self)
+        super().mousePressEvent(event)
 
 class VariantDetailWindow(QDialog):
     def __init__(self, variant_code, parent=None):
@@ -352,173 +554,692 @@ class VariantDetailWindow(QDialog):
         self.setGeometry(150, 150, 800, 700)
         self.setStyleSheet("background-color: #E8D4C8;")
         self.initUI()
+
     def initUI(self):
         main_layout = QVBoxLayout()
         main_layout.setContentsMargins(0, 0, 0, 0)
+        
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setStyleSheet("QScrollArea{border:none;background-color:#E8D4C8;}")
+        
         content_widget = QWidget()
         content_widget.setStyleSheet("background-color: #E8D4C8;")
         content_layout = QVBoxLayout()
         content_layout.setContentsMargins(0, 0, 0, 0)
         content_layout.setSpacing(0)
+        
         content_layout.addWidget(SectionHeader("Description"))
+        
         details = get_variant_details(self.variant_code)
         if details:
             variant_code, standard_code, variant_char, key_refs, bopomofo, pinyin, researcher, explanation, glyph_path = details
+            
+            custom_css, custom_stack = font_manager.get_font_data_for_char(variant_char or "")
+
             row1 = TableRow("Variant\nCharacter")
-            h_box = QWidget(); h_lay = QHBoxLayout(); h_lay.setContentsMargins(0,0,0,0)
-            code_label = QLabel(f"[{variant_code}]"); code_label.setStyleSheet(f"font-family:{CHINESE_FALLBACK_FONTS};font-size:16px;color:#333;"); h_lay.addWidget(code_label)
+            h_box = QWidget()
+            h_lay = QHBoxLayout()
+            h_lay.setContentsMargins(0,0,0,0)
+            h_lay.setSpacing(20)
+            
+            code_label = QLabel(f"[{variant_code}]")
+            code_label.setStyleSheet(f"font-size:24px;font-weight:bold;color:#555;")
+            h_lay.addWidget(code_label)
+            
             resolved_glyph = resolve_image_path(glyph_path) if glyph_path else None
             if resolved_glyph:
-                glyph_label = QLabel(); glyph_label.setPixmap(QPixmap(resolved_glyph).scaled(50, 50, Qt.KeepAspectRatio, Qt.SmoothTransformation)); h_lay.addWidget(glyph_label)
+                glyph_label = QLabel()
+                glyph_label.setPixmap(QPixmap(resolved_glyph).scaled(64, 64, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+                h_lay.addWidget(glyph_label)
+            
             if variant_char:
-                char_label = QLabel(variant_char); char_label.setStyleSheet(f"font-family:{CHINESE_FALLBACK_FONTS};font-size:14px;color:#333;"); h_lay.addWidget(char_label)
-            h_lay.addStretch(); h_box.setLayout(h_lay)
-            row1.clear_content(); row1.content_layout.addWidget(h_box); content_layout.addWidget(row1)
+                char_view = QWebEngineView()
+                char_view.setFixedSize(150, 100)
+                char_view.page().setBackgroundColor(Qt.transparent)
+                char_view.setAttribute(Qt.WA_TransparentForMouseEvents)
+                
+                char_html = f"""
+                <html>
+                <head>
+                    <style>
+                        {custom_css}
+                        html, body {{
+                            margin: 0; padding: 0; width: 100%; height: 100%;
+                            background: transparent; overflow: hidden;
+                        }}
+                        body {{
+                            display: flex;
+                            justify-content: center;
+                            align-items: center;
+                        }}
+                        .v {{ 
+                            font-family: {custom_stack}; 
+                            font-size: 24px; 
+                            color: #8B0000; 
+                            font-weight: bold;
+                            line-height: 1;
+                        }}
+                    </style>
+                </head>
+                <body>
+                    <div class="v">{variant_char}</div>
+                </body>
+                </html>
+                """
+                char_view.setHtml(char_html, QUrl.fromLocalFile(SCRIPT_DIR))
+                h_lay.addWidget(char_view)
+            
+            h_lay.addStretch()
+            h_box.setLayout(h_lay)
+            row1.clear_content()
+            row1.content_layout.addWidget(h_box)
+            content_layout.addWidget(row1)
             
             row2 = TableRow("Content")
-            if key_refs:
-                html = format_text_with_images(key_refs, "default")
+            if key_refs: 
+                html = format_text_with_images(key_refs, "default", custom_css, custom_stack)
                 row2.set_html_content(html, 80)
-            else:
+            else: 
                 row2.add_text_label("No data available")
             content_layout.addWidget(row2)
             
             if any([bopomofo, pinyin, researcher, explanation]):
                 content_layout.addWidget(SectionHeader("Research Notes"))
-                if bopomofo: r = TableRow("Bopomofo"); r.add_text_label(bopomofo, 24); content_layout.addWidget(r)
-                if pinyin: r = TableRow("Hanyu\nPinyin"); r.add_text_label(pinyin, 16); content_layout.addWidget(r)
-                if researcher: r = TableRow("Researcher"); r.add_text_label(researcher, 14); content_layout.addWidget(r)
-                if explanation: r = TableRow("Content", has_top_accent=True); html = format_text_with_images(explanation, "default"); r.set_html_content(html, 150); content_layout.addWidget(r)
+                if bopomofo:
+                    r = TableRow("Bopomofo")
+                    r.add_text_label(bopomofo, 24)
+                    content_layout.addWidget(r)
+                if pinyin:
+                    r = TableRow("Hanyu\nPinyin")
+                    r.add_text_label(pinyin, 16)
+                    content_layout.addWidget(r)
+                if researcher:
+                    r = TableRow("Researcher")
+                    r.add_text_label(researcher, 14)
+                    content_layout.addWidget(r)
+                
+                if explanation: 
+                    r = TableRow("Content", has_top_accent=True)
+                    html = format_text_with_images(explanation, "default", custom_css, custom_stack)
+                    r.set_html_content(html, 150)
+                    content_layout.addWidget(r)
         
-        btn_frame = QFrame(); btn_layout = QHBoxLayout(); btn_layout.setContentsMargins(20, 15, 20, 15); btn_layout.addStretch()
-        close_btn = QPushButton("Close"); close_btn.setStyleSheet("QPushButton{background:#666;color:white;border:none;border-radius:5px;padding:8px 25px;font-size:13px;}QPushButton:hover{background:#888;}")
-        close_btn.clicked.connect(self.close); btn_layout.addWidget(close_btn); btn_frame.setLayout(btn_layout); content_layout.addWidget(btn_frame)
-        content_widget.setLayout(content_layout); scroll.setWidget(content_widget); main_layout.addWidget(scroll); self.setLayout(main_layout)
+        btn_frame = QFrame()
+        btn_layout = QHBoxLayout()
+        btn_layout.setContentsMargins(20, 15, 20, 15)
+        btn_layout.addStretch()
+        close_btn = QPushButton("Close")
+        close_btn.setStyleSheet("QPushButton{background:#666;color:white;border:none;border-radius:5px;padding:8px 25px;}")
+        close_btn.clicked.connect(self.close)
+        btn_layout.addWidget(close_btn)
+        btn_frame.setLayout(btn_layout)
+        content_layout.addWidget(btn_frame)
+        
+        content_widget.setLayout(content_layout)
+        scroll.setWidget(content_widget)
+        main_layout.addWidget(scroll)
+        self.setLayout(main_layout)
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 6. MAIN WINDOW
+# NEW: APPENDIX DETAIL WINDOW
 # ═══════════════════════════════════════════════════════════════════════════
 
-class CharacterDictionary(QMainWindow):
-    def __init__(self):
-        super().__init__()
-        self.current_char = ""
+class AppendixDetailWindow(QDialog):
+    """New Window to show Appendix Details with English Labels"""
+    def __init__(self, appendix_id, char, parent=None):
+        super().__init__(parent)
+        self.appendix_id = appendix_id
+        self.char = char
+        self.setWindowTitle(f'Appendix Details - {char}')
+        self.setGeometry(150, 150, 800, 700)
+        self.setStyleSheet("background-color: #E8D4C8;")
+        self.initUI()
+
+    def initUI(self):
+        main_layout = QVBoxLayout()
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet("QScrollArea{border:none;background-color:#E8D4C8;}")
+        
+        content_widget = QWidget()
+        content_widget.setStyleSheet("background-color: #E8D4C8;")
+        content_layout = QVBoxLayout()
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(0)
+        
+        content_layout.addWidget(SectionHeader("Appendix Information"))
+        
+        # Fetch data
+        data = get_appendix_info(self.appendix_id)
+        
+        if data:
+            # Unpack: result_char, icon_label, char_form, radical_stroke, pronunciation, 
+            # examples_or_notes, char_code, surname_single, surname_compound, surname_double
+            (result_char, icon_label, char_form, radical_stroke, pronunciation, 
+             examples_or_notes, char_code, surname_single, surname_compound, surname_double) = data
+             
+            custom_css, custom_stack = font_manager.get_font_data_for_char(result_char or "")
+
+            # --- Row 1: Header (Char + Icon) ---
+            row1 = TableRow("Character")
+            h_box = QWidget(); h_lay = QHBoxLayout(); h_lay.setContentsMargins(0,0,0,0); h_lay.setSpacing(20)
+            
+            # Big Char View
+            char_view = QWebEngineView()
+            char_view.setFixedSize(120, 100)
+            char_view.page().setBackgroundColor(Qt.transparent)
+            char_view.setAttribute(Qt.WA_TransparentForMouseEvents)
+            char_html = f"""
+            <html><head><style>{custom_css}
+            body {{ margin:0; padding:0; display:flex; align-items:center; justify-content:center; background:transparent; overflow:hidden; }}
+            .v {{ font-family: {custom_stack}; font-size: 64px; color: #8B0000; font-weight: bold; line-height: 1; }}
+            </style></head><body><div class="v">{result_char}</div></body></html>
+            """
+            char_view.setHtml(char_html, QUrl.fromLocalFile(SCRIPT_DIR))
+            h_lay.addWidget(char_view)
+            
+            # Icon Label
+            if icon_label:
+                icon_lbl = QLabel(f"Type: {icon_label}")
+                icon_lbl.setStyleSheet("color:#555; font-weight:bold; font-size:16px;")
+                h_lay.addWidget(icon_lbl)
+                
+            h_lay.addStretch()
+            h_box.setLayout(h_lay)
+            row1.clear_content()
+            row1.content_layout.addWidget(h_box)
+            content_layout.addWidget(row1)
+            
+            # --- Dynamic Rows based on Data ---
+            
+            if char_code:
+                r = TableRow("Surname Code")
+                r.add_text_label(char_code, 16)
+                content_layout.addWidget(r)
+
+            if char_form:
+                r = TableRow("Character\nForm")
+                # Char form often contains images or special chars
+                html = format_text_with_images(char_form, "default", custom_css, custom_stack)
+                r.set_html_content(html, 60)
+                content_layout.addWidget(r)
+                
+            if radical_stroke:
+                r = TableRow("Radical /\nStroke")
+                r.add_text_label(radical_stroke, 14)
+                content_layout.addWidget(r)
+                
+            if pronunciation:
+                r = TableRow("Pronunciation")
+                r.add_text_label(pronunciation, 16)
+                content_layout.addWidget(r)
+                
+            if examples_or_notes:
+                r = TableRow("Examples /\nNotes")
+                html = format_text_with_images(examples_or_notes, "default", custom_css, custom_stack)
+                r.set_html_content(html, 100)
+                content_layout.addWidget(r)
+                
+            # Surname Specifics
+            if surname_single:
+                r = TableRow("Single\nSurname")
+                r.add_text_label(surname_single, 14)
+                content_layout.addWidget(r)
+                
+            if surname_compound:
+                r = TableRow("Compound\nSurname")
+                r.add_text_label(surname_compound, 14)
+                content_layout.addWidget(r)
+                
+            if surname_double:
+                r = TableRow("Double\nSurname")
+                r.add_text_label(surname_double, 14)
+                content_layout.addWidget(r)
+
+        # Close Button
+        btn_frame = QFrame()
+        btn_layout = QHBoxLayout()
+        btn_layout.setContentsMargins(20, 15, 20, 15)
+        btn_layout.addStretch()
+        close_btn = QPushButton("Close")
+        close_btn.setStyleSheet("QPushButton{background:#666;color:white;border:none;border-radius:5px;padding:8px 25px;}")
+        close_btn.clicked.connect(self.close)
+        btn_layout.addWidget(close_btn)
+        btn_frame.setLayout(btn_layout)
+        content_layout.addWidget(btn_frame)
+        
+        content_layout.addStretch()
+        content_widget.setLayout(content_layout)
+        scroll.setWidget(content_widget)
+        main_layout.addWidget(scroll)
+        self.setLayout(main_layout)
+
+class CharacterDescriptionWindow(QDialog):
+    """Window to show full character description (like description.py)"""
+    def __init__(self, char, code, parent=None):
+        super().__init__(parent)
+        self.char = char
+        self.code = code
+        self.setWindowTitle(f'Character Details - {char}')
+        self.setGeometry(100, 100, 1000, 900)
+        self.setStyleSheet("background-color: #E8D4C8;")
         self.variant_boxes = []
         self.selected_variant_box = None
         self.initUI()
-    
+
     def initUI(self):
-        self.setWindowTitle('Chinese Character Dictionary')
-        self.setGeometry(100, 100, 1000, 900)
-        main_widget = QWidget(); main_widget.setStyleSheet("background-color: #E8D4C8;"); self.setCentralWidget(main_widget)
-        scroll = QScrollArea(); scroll.setWidgetResizable(True); scroll.setStyleSheet("QScrollArea{border:none;background-color:#E8D4C8;}")
-        content_widget = QWidget(); content_widget.setStyleSheet("background-color: #E8D4C8;"); content_layout = QVBoxLayout(); content_layout.setContentsMargins(20, 20, 20, 20); content_layout.setSpacing(0)
+        main_layout = QVBoxLayout()
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet("QScrollArea{border:none;background-color:#E8D4C8;}")
+        
+        content_widget = QWidget()
+        content_widget.setStyleSheet("background-color: #E8D4C8;")
+        content_layout = QVBoxLayout()
+        content_layout.setContentsMargins(20, 20, 20, 20)
+        content_layout.setSpacing(0)
         
         # Header
-        header = QFrame(); header.setStyleSheet("background:transparent;"); h_layout = QHBoxLayout()
-        self.code_label = QLabel(""); self.code_label.setStyleSheet("font-size:18px;font-weight:bold;color:#333;background:transparent;"); h_layout.addWidget(self.code_label)
+        header = QFrame()
+        header.setStyleSheet("background:transparent;")
+        h_layout = QHBoxLayout()
         
-        # *** Using Web Engine for Main Char ***
-        self.main_char_web_view = MainCharWebWidget(); h_layout.addWidget(self.main_char_web_view)
+        code_label = QLabel(self.code)
+        code_label.setStyleSheet("font-size:18px;font-weight:bold;color:#333;")
+        h_layout.addWidget(code_label)
         
-        self.stroke_label = QLabel(""); self.stroke_label.setStyleSheet("font-size:14px;color:#666;background:transparent;"); h_layout.addWidget(self.stroke_label); h_layout.addStretch(); header.setLayout(h_layout); content_layout.addWidget(header); content_layout.addSpacing(20)
+        main_char_label = QLabel(self.char)
+        main_char_label.setStyleSheet(f"font-size:100px;color:#8B0000;font-weight:bold;font-family:{DEFAULT_FONTS};")
+        h_layout.addWidget(main_char_label)
         
-        # Input
-        input_frame = QFrame(); input_frame.setStyleSheet("QFrame{background:white;border:1px solid #DDD;border-radius:5px;}"); i_layout = QHBoxLayout(); i_layout.setContentsMargins(15, 10, 15, 10)
-        i_layout.addWidget(QLabel("Enter Character:", styleSheet="border:none;"))
-        self.entry = QLineEdit(); self.entry.setPlaceholderText("Type char..."); self.entry.setMaxLength(2); self.entry.setFixedWidth(150); self.entry.setStyleSheet(f"font-size:24px;padding:5px;border:2px solid #8B0000;border-radius:5px;font-family:{CHINESE_FALLBACK_FONTS};"); self.entry.returnPressed.connect(self.search_character); i_layout.addWidget(self.entry)
-        search_btn = QPushButton("Search"); search_btn.setStyleSheet("QPushButton{background:#8B0000;color:white;border:none;border-radius:5px;padding:8px 20px;font-weight:bold;}"); search_btn.clicked.connect(self.search_character); i_layout.addWidget(search_btn)
-        clear_btn = QPushButton("Clear"); clear_btn.setStyleSheet("QPushButton{background:#666;color:white;border:none;border-radius:5px;padding:8px 20px;}"); clear_btn.clicked.connect(self.clear_all); i_layout.addWidget(clear_btn); i_layout.addStretch(); input_frame.setLayout(i_layout); content_layout.addWidget(input_frame); content_layout.addSpacing(15)
+        stroke_label = QLabel("--05-06")
+        stroke_label.setStyleSheet("font-size:14px;color:#666;")
+        h_layout.addWidget(stroke_label)
+        h_layout.addStretch()
+        
+        header.setLayout(h_layout)
+        content_layout.addWidget(header)
+        content_layout.addSpacing(20)
         
         # Variants
         content_layout.addWidget(SectionHeader("Variants"))
-        self.variants_container = QFrame(); self.variants_container.setStyleSheet("QFrame{background:#F8F8F5;border:1px solid #DDD;border-top:none;}")
-        self.variants_scroll = QScrollArea(); self.variants_scroll.setWidgetResizable(True); self.variants_scroll.setFixedHeight(120); self.variants_scroll.setStyleSheet("QScrollArea{border:none;background:transparent;}") # Height adjusted for bigger boxes
-        self.variants_widget = QWidget(); self.variants_layout = QHBoxLayout(); self.variants_layout.setContentsMargins(15, 10, 15, 10); self.variants_layout.setSpacing(8); self.variants_layout.setAlignment(Qt.AlignLeft); self.variants_widget.setLayout(self.variants_layout); self.variants_scroll.setWidget(self.variants_widget)
-        c_layout = QVBoxLayout(); c_layout.setContentsMargins(0, 0, 0, 0); c_layout.addWidget(self.variants_scroll); self.variants_container.setLayout(c_layout); content_layout.addWidget(self.variants_container); content_layout.addSpacing(15)
+        self.variants_container = QFrame()
+        self.variants_container.setStyleSheet("QFrame{background:#F8F8F5;border:1px solid #DDD;border-top:none;}")
+        self.variants_scroll = QScrollArea()
+        self.variants_scroll.setWidgetResizable(True)
+        self.variants_scroll.setFixedHeight(120)
+        self.variants_scroll.setStyleSheet("QScrollArea{border:none;background:transparent;}")
         
-        # Description
+        self.variants_widget = QWidget()
+        self.variants_layout = QHBoxLayout()
+        self.variants_layout.setContentsMargins(15, 10, 15, 10)
+        self.variants_layout.setSpacing(8)
+        self.variants_layout.setAlignment(Qt.AlignLeft)
+        
+        self.variants_widget.setLayout(self.variants_layout)
+        self.variants_scroll.setWidget(self.variants_widget)
+        
+        c_layout = QVBoxLayout()
+        c_layout.setContentsMargins(0, 0, 0, 0)
+        c_layout.addWidget(self.variants_scroll)
+        self.variants_container.setLayout(c_layout)
+        
+        content_layout.addWidget(self.variants_container)
+        content_layout.addSpacing(15)
+
+        # Populate Variants
+        self.update_variants_display()
+
+        # Description Section
         content_layout.addWidget(SectionHeader("Description"))
-        self.rows = [TableRow("Standard\nCharacter"), TableRow("Shuowen\nEtymology"), TableRow("Character\nStyle"), TableRow("Zhuyin"), TableRow("Hanyu\nPinyin"), TableRow("Definition", has_top_accent=True)]
-        for row in self.rows: content_layout.addWidget(row)
-        content_layout.addStretch(); content_widget.setLayout(content_layout); scroll.setWidget(content_widget); main_layout = QVBoxLayout(); main_layout.setContentsMargins(0, 0, 0, 0); main_layout.addWidget(scroll); main_widget.setLayout(main_layout)
+        
+        description = get_character_description(self.char)
+        
+        # Prepare rows
+        self.rows = [
+            TableRow("Standard\nCharacter"),
+            TableRow("Shuowen\nEtymology"),
+            TableRow("Character\nStyle"),
+            TableRow("Zhuyin"),
+            TableRow("Hanyu\nPinyin"),
+            TableRow("Definition", has_top_accent=True)
+        ]
+        
+        for row in self.rows:
+            content_layout.addWidget(row)
+
+        if description:
+            standard_char, shuowen, char_style, zhuyin, pinyin, definition = description
+            
+            # Helper to set content
+            def set_row_data(row_index, text, section_type=None):
+                if text:
+                    if section_type:
+                        html = format_text_with_images(text, section_type)
+                        min_h = 200 if section_type == "definition" else 80
+                        self.rows[row_index].set_html_content(html, min_h)
+                    else:
+                        self.rows[row_index].add_text_label(text)
+                else:
+                    self.rows[row_index].add_text_label("No data")
+
+            # Row 0: Standard Char (Just text for now)
+            self.rows[0].add_text_label(f"[{self.code}] {self.char}")
+            
+            # Row 1: Shuowen
+            set_row_data(1, shuowen, "shuowen")
+            
+            # Row 2: Style
+            set_row_data(2, char_style, "style")
+            
+            # Row 3: Zhuyin
+            if zhuyin: self.rows[3].add_text_label(zhuyin, 24)
+            else: self.rows[3].add_text_label("No data")
+            
+            # Row 4: Pinyin
+            if pinyin: self.rows[4].add_text_label(pinyin, 16)
+            else: self.rows[4].add_text_label("No data")
+            
+            # Row 5: Definition
+            set_row_data(5, definition, "definition")
+
+        else:
+            for row in self.rows:
+                row.add_text_label("No Data Found")
+
+        content_layout.addStretch()
+        
+        content_widget.setLayout(content_layout)
+        scroll.setWidget(content_widget)
+        main_layout.addWidget(scroll)
+        
+        # Close Button Area
+        btn_frame = QFrame()
+        btn_layout = QHBoxLayout()
+        btn_layout.setContentsMargins(20, 10, 20, 10)
+        btn_layout.addStretch()
+        close_btn = QPushButton("Close Window")
+        close_btn.setStyleSheet("QPushButton{background:#666;color:white;border:none;border-radius:5px;padding:10px 30px;font-weight:bold;}")
+        close_btn.clicked.connect(self.close)
+        btn_layout.addWidget(close_btn)
+        btn_frame.setLayout(btn_layout)
+        main_layout.addWidget(btn_frame)
+
+        self.setLayout(main_layout)
 
     def on_variant_clicked(self, box):
-        if self.selected_variant_box: self.selected_variant_box.set_selected(False)
-        box.set_selected(True); self.selected_variant_box = box
+        if self.selected_variant_box:
+            self.selected_variant_box.set_selected(False)
+        box.set_selected(True)
+        self.selected_variant_box = box
+        
         if box.variant_code:
             detail_window = VariantDetailWindow(box.variant_code, self)
             detail_window.show()
 
-    def clear_variants_display(self):
+    def update_variants_display(self):
+        # Clear existing
         for box in self.variant_boxes:
             try: box.clicked.disconnect()
             except: pass
             box.deleteLater()
-        self.variant_boxes.clear(); self.selected_variant_box = None
-        while self.variants_layout.count():
-            item = self.variants_layout.takeAt(0)
-            if item.widget(): item.widget().deleteLater()
-
-    def update_variants_display(self, char):
-        self.clear_variants_display()
-        variants = get_variants(char)
+        self.variant_boxes.clear()
+        
+        variants = get_variants(self.char)
+        
         if not variants:
-            no_variants_label = QLabel("No variants found for this character"); no_variants_label.setStyleSheet("color:#999;font-size:14px;font-style:italic;padding:10px;"); self.variants_layout.addWidget(no_variants_label); self.variants_layout.addStretch(); return
+            no_var = QLabel("No variants found.")
+            no_var.setStyleSheet("color:#666; font-style:italic;")
+            self.variants_layout.addWidget(no_var)
+            return
+
         for variant_code, variant_char, img_path in variants:
-            suffix = f".{variant_code.split('-')[-1]}" if variant_code and '-' in variant_code else ""
-            box = VariantCharacterBox((variant_char or "").strip(), suffix, (img_path or "").strip(), variant_code)
+            suffix = ""
+            if variant_code and '-' in variant_code:
+                suffix = f".{variant_code.split('-')[-1]}"
+            
+            box = VariantCharacterBox(
+                char=(variant_char or "").strip(),
+                code=suffix,
+                img_path=(img_path or "").strip(),
+                variant_code=variant_code
+            )
             box.clicked.connect(self.on_variant_clicked)
             self.variants_layout.addWidget(box)
             self.variant_boxes.append(box)
-        self.variants_layout.addStretch()
 
-    def get_first_character(self, text):
-        if not text: return ""
-        text = normalize_char(text)
-        if len(text) >= 2 and 0xD800 <= ord(text[0]) <= 0xDBFF: return text[:2]
-        return text[0]
+# ═══════════════════════════════════════════════════════════════════════════
+# 5. MAIN APPLICATION WINDOW
+# ═══════════════════════════════════════════════════════════════════════════
 
-    def search_character(self):
-        raw_text = self.entry.text().strip()
-        if not raw_text: QMessageBox.warning(self, "Input Error", "Please enter a character."); return
-        char = self.get_first_character(raw_text); char = normalize_char(char)
-        char_info = get_character_info(char)
-        if not char_info: QMessageBox.information(self, "Not Found", f"No information found for '{char}'."); return
-        code, main_char = char_info
+class DictionaryApp(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle('Chinese Character Dictionary')
+        self.setGeometry(100, 100, 1100, 800)
+        self.initUI()
+
+    def initUI(self):
+        main_widget = QWidget()
+        main_widget.setStyleSheet("background-color: #E8D4C8;")
+        self.setCentralWidget(main_widget)
         
-        self.code_label.setText(code); self.stroke_label.setText("--05-06")
+        layout = QVBoxLayout()
+        layout.setContentsMargins(20, 20, 20, 20)
         
-        # *** LOAD TARGETED FONT ***
-        self.main_char_web_view.load_char(main_char)
+        # --- Search Bar ---
+        search_frame = QFrame()
+        search_frame.setStyleSheet("background:white; border-radius:10px; padding:10px;")
+        search_layout = QHBoxLayout()
+        search_layout.setContentsMargins(10, 5, 10, 5)
         
-        self.update_variants_display(char)
-        description = get_character_description(char)
-        if not description:
-            for row in self.rows: row.clear_content()
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("Enter character to search...")
+        self.search_input.setStyleSheet(f"border:none; font-size:18px; font-family:{DEFAULT_FONTS};")
+        self.search_input.returnPressed.connect(self.perform_search)
+        
+        search_btn = QPushButton("Search")
+        search_btn.setStyleSheet("background:#8B0000; color:white; padding:8px 20px; border-radius:5px; font-weight:bold;")
+        search_btn.setCursor(Qt.PointingHandCursor)
+        search_btn.clicked.connect(self.perform_search)
+        
+        search_layout.addWidget(self.search_input)
+        search_layout.addWidget(search_btn)
+        search_frame.setLayout(search_layout)
+        layout.addWidget(search_frame)
+        
+        layout.addSpacing(15)
+        
+        # --- Tabs for Results ---
+        self.tabs = QTabWidget()
+        self.tabs.setStyleSheet("""
+            QTabWidget::pane { 
+                border: 1px solid #CCC; 
+                top: -1px; 
+            }
+            QTabBar::tab { 
+                background: #DDD; 
+                padding: 8px 15px; /* Reduced horizontal padding */
+                min-width: 120px;   /* Ensure a minimum width */
+                border: 1px solid #CCC;
+                border-bottom: none;
+                margin-right: 2px;
+            }
+            QTabBar::tab:selected { 
+                background: white; 
+                border-bottom: 2px solid white; 
+                font-weight: bold;
+            }
+        """)
+        
+        # Tab 1: Text Results
+        self.text_scroll = QScrollArea()
+        self.text_scroll.setWidgetResizable(True)
+        self.text_scroll.setStyleSheet("background:transparent; border:none;")
+        self.text_container = QWidget()
+        self.text_grid = QWidget() # Placeholder for grid
+        self.text_scroll.setWidget(self.text_container)
+        
+        # Tab 2: Appendix Results
+        self.appendix_scroll = QScrollArea()
+        self.appendix_scroll.setWidgetResizable(True)
+        self.appendix_scroll.setStyleSheet("background:transparent; border:none;")
+        self.appendix_container = QWidget()
+        self.appendix_scroll.setWidget(self.appendix_container)
+        
+        self.tabs.addTab(self.text_scroll, "Text Results")
+        self.tabs.addTab(self.appendix_scroll, "Appendix")
+        
+        layout.addWidget(self.tabs)
+        main_widget.setLayout(layout)
+
+    def perform_search(self):
+        query = self.search_input.text().strip()
+        if not query:
             return
-        standard_char, shuowen, char_style, zhuyin, pinyin, definition = description
-        data_map = [(f"[{code}] {main_char} --05-06", 18, None), (shuowen, None, "shuowen"), (char_style, None, "style"), (zhuyin, 24, None), (pinyin, 16, None), (definition, None, "definition")]
-        for i, (text, font_size, section) in enumerate(data_map):
-            if section:
-                html = format_text_with_images(text or "", section)
-                min_h = 200 if section == "definition" else 80
-                self.rows[i].set_html_content(html, min_h)
-            else:
-                self.rows[i].clear_content()
-                self.rows[i].add_text_label(text or "No data", font_size or 14)
+            
+        search_char = query[0]
+        text_results, appendix_results = get_search_results(search_char)
+        
+        # FIX: Loop through ALL rows and convert them to mutable lists
+        text_results_mutable = []
+        for row in text_results:
+            row_list = list(row)
+            # row_list[0] is the result_char (e.g., "丹A03410-003...")
+            # We only want the very first character '丹'
+            if row_list[0]:
+                row_list[0] = row_list[0][0] 
+            text_results_mutable.append(row_list)
+        
+        # Repeat for Appendix if necessary (though usually Appendix chars are already clean)
+        appendix_mutable = [list(row) for row in appendix_results]
+        
+        self.populate_grid(self.text_scroll, text_results, is_text_type=True)
+        self.populate_grid(self.appendix_scroll, appendix_results, is_text_type=False)
+        
+        # Update tab titles
+        self.tabs.setTabText(0, f"Text Results ({len(text_results)})")
+        self.tabs.setTabText(1, f"Appendix ({len(appendix_results)})")
 
-    def clear_all(self):
-        self.entry.clear(); self.code_label.setText(""); self.main_char_web_view.setHtml(""); self.stroke_label.setText("")
-        for row in self.rows: row.clear_content()
-        self.clear_variants_display(); self.entry.setFocus()
+    def populate_grid(self, scroll_area, results, is_text_type=True):
+        container = QWidget()
+        container.setStyleSheet("background: #FDFDFD;")
+        grid = QGridLayout()
+        grid.setContentsMargins(20, 20, 20, 20)
+        grid.setSpacing(15)
+        
+        columns = 6
+        row = 0
+        col = 0
+        
+        if not results:
+            lbl = QLabel("No results found.")
+            lbl.setStyleSheet("color:#888; font-size:16px; padding:20px;")
+            grid.addWidget(lbl, 0, 0)
+        else:
+            for item in results:
+                if is_text_type:
+                    # unpack: result_char, result_code, ucs_code, radical_stroke, detail_url, data_sn, icon_label
+                    r_char, r_code, ucs, rs, url, sn, icon = item
+                    full_text = f"{r_char}{r_code}" 
+                    bottom = r_code
+                else:
+                    # FIXED: unpack 'id' at the end (from get_search_results update)
+                    r_char, icon, ucs, rs, url, anchor, search_res_id = item
+                    
+                    # Store ID in full_text with prefix for click handler
+                    full_text = f"Appendix:{search_res_id}"
+                    bottom = icon or "Appendix"
+
+                # Create Box
+                box = SearchResultBox(
+                    char=r_char,
+                    alter_char=r_char[0][0],
+                    bottom_label="" if icon else bottom,
+                    ucs_code=ucs,
+                    icon_label=icon,
+                    full_text=full_text
+                )
+                box.clicked.connect(self.on_result_clicked)
+                
+                grid.addWidget(box, row, col)
+                
+                col += 1
+                if col >= columns:
+                    col = 0
+                    row += 1
+        
+        grid.setRowStretch(row + 1, 1)
+        grid.setColumnStretch(columns, 1)
+        container.setLayout(grid)
+        scroll_area.setWidget(container)
+
+    def on_result_clicked(self, full_text, ucs_code):
+        # ─── 1. APPENDIX LOGIC ─────────────────────────────
+        if full_text.startswith("Appendix:"):
+            # Extract the ID from the string "Appendix:123"
+            search_res_id = full_text.split(":")[1]
+            
+            # Helper to get the title char (since we don't have it in the clicked signal directly)
+            # We look it up in search_results using the ID to be 100% sure we have the right char
+            conn = sqlite3.connect(DB)
+            cur = conn.cursor()
+            cur.execute("SELECT result_char FROM search_results WHERE id=?", (search_res_id,))
+            res = cur.fetchone()
+            conn.close()
+            
+            char_title = res[0] if res else "?"
+
+            self.app_window = AppendixDetailWindow(search_res_id, char_title, self)
+            self.app_window.show()
+            return
+
+        # ─── 2. STANDARD TEXT LOGIC ────────────────────────
+        extracted_code = extract_code_from_text(full_text)
+        char_info = None
+        
+        if extracted_code:
+            char_info = get_character_by_code(extracted_code)
+        
+        if not char_info and extracted_code:
+            main_code = find_main_code_from_variant(extracted_code)
+            if main_code:
+                char_info = get_character_by_code(main_code)
+
+        if not char_info:
+            clean_char = full_text[0] if full_text else ""
+            char_info = get_character_info(clean_char)
+
+        if char_info:
+            code, char = char_info
+            self.desc_window = CharacterDescriptionWindow(char, code, self)
+            self.desc_window.show()
+        else:
+            QMessageBox.information(self, "Info", f"Detailed description not found for {full_text}")
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 6. ENTRY POINT
+# ═══════════════════════════════════════════════════════════════════════════
+
+from PyQt5.QtWidgets import QGridLayout # Imported late for the grid logic
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
     app.setStyle('Fusion')
-    window = CharacterDictionary()
+    
+    # Global stylesheet tweaks
+    app.setStyleSheet("""
+        QLineEdit { padding: 5px; border: 1px solid #CCC; border-radius: 4px; }
+        QScrollBar:vertical { width: 10px; background: #F0F0F0; }
+        QScrollBar::handle:vertical { background: #CCC; border-radius: 5px; }
+        QScrollBar::handle:vertical:hover { background: #999; }
+    """)
+    
+    window = DictionaryApp()
     window.show()
     sys.exit(app.exec_())
