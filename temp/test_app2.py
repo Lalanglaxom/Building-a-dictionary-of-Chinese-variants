@@ -41,7 +41,7 @@ class FontManager:
         """
         if not os.path.exists(FONT_DIR):
             os.makedirs(FONT_DIR)
-            return
+        return
 
         files = sorted([f for f in os.listdir(FONT_DIR) if f.lower().endswith(('.woff', '.ttf'))])
         

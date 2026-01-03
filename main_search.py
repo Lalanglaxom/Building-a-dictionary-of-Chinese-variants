@@ -2,13 +2,12 @@ import sys
 import sqlite3
 import os
 import re
-import webbrowser
 
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                              QHBoxLayout, QLabel, QLineEdit, QPushButton, 
                              QFrame, QScrollArea, QMessageBox, QTextEdit, QDialog,
-                             QTabWidget)
-from PyQt5.QtGui import QFont, QPixmap, QCursor
+                             QTabWidget, QGridLayout)
+from PyQt5.QtGui import QPixmap, QCursor
 from PyQt5.QtCore import Qt, pyqtSignal, QUrl
 from PyQt5.QtWebEngineWidgets import QWebEngineView
 
@@ -140,8 +139,6 @@ def format_text_with_images(text, section_type="default", extra_css="", font_sta
     """
 
 def extract_code_from_text(full_text):
-    """Extract code like A03410-003 from text like '丹A03410-003U+4E39丶-內 4'"""
-    # Match pattern: uppercase letter followed by digits, hyphen, digits
     match = re.search(r'([A-Z]\d{5}-\d{3})', full_text)
     if match:
         return match.group(1)
@@ -160,13 +157,17 @@ def get_search_results(search_char):
     """, (search_char,))
     text_results = cur.fetchall()
     
+    # FIXED: Explicitly select 'id' as the last column for robust linking
     cur.execute("""
-        SELECT result_char, icon_label, ucs_code, radical_stroke, detail_url, appendix_id, anchor_id
+        SELECT result_char, icon_label, ucs_code, radical_stroke, detail_url, anchor_id, id
         FROM search_results
         WHERE search_char = ? AND result_type = 'Appendix'
         ORDER BY icon_label
     """, (search_char,))
     appendix_results = cur.fetchall()
+    
+    conn.close()
+    return text_results, appendix_results
     
     conn.close()
     return text_results, appendix_results
@@ -180,7 +181,6 @@ def get_character_info(char):
     return row
 
 def get_character_by_code(code):
-    """Get character info by code from summary table"""
     conn = sqlite3.connect(DB)
     cur = conn.cursor()
     cur.execute("SELECT code, char FROM summary WHERE code=?;", (code,))
@@ -189,7 +189,6 @@ def get_character_by_code(code):
     return row
 
 def find_main_code_from_variant(code):
-    """Find main code if the code is a variant"""
     conn = sqlite3.connect(DB)
     cur = conn.cursor()
     cur.execute("SELECT main_code FROM variants WHERE variant_code=?;", (code,))
@@ -237,15 +236,31 @@ def get_variant_details(variant_code):
     conn.close()
     return row
 
+def get_appendix_info(search_res_id):
+    """
+    Fetch details for the appendix entry.
+    FIXED: Queries by 'search_result_id' (Foreign Key) to ensure correct matching.
+    """
+    conn = sqlite3.connect(DB)
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT result_char, icon_label, char_form, radical_stroke, pronunciation, 
+               examples_or_notes, char_code, surname_single, surname_compound, surname_double
+        FROM appendix_details
+        WHERE search_result_id = ? 
+    """, (search_res_id,))
+    row = cur.fetchone()
+    conn.close()
+    return row
+
 # ═══════════════════════════════════════════════════════════════════════════
 # 3. SEARCH RESULT BOX
 # ═══════════════════════════════════════════════════════════════════════════
 
 class SearchResultBox(QFrame):
-    """Clickable box for search result"""
-    clicked = pyqtSignal(str, str)  # Emits (full_text, ucs_code)
+    clicked = pyqtSignal(str, str) 
     
-    def __init__(self, alter_char="",char="", bottom_label="", ucs_code="", icon_label="", full_text="", parent=None):
+    def __init__(self, alter_char="", char="", bottom_label="", ucs_code="", icon_label="", full_text="", parent=None):
         super().__init__(parent)
         self.alter_char = char
         self.char = alter_char
@@ -269,7 +284,6 @@ class SearchResultBox(QFrame):
         
         custom_css, font_stack = font_manager.get_font_data_for_char(char)
         char_html = f"""
-        <!DOCTYPE html>
         <html>
         <head>
             <style>
@@ -292,16 +306,18 @@ class SearchResultBox(QFrame):
                     color: #333;
                     line-height: 1;
                 }}
+                /* FIXED: Icon position at bottom left of the char box */
                 .icon {{
                     position: absolute;
-                    bottom: 2px;
-                    left: 2px;
+                    bottom: 0px;
+                    left: 0px;
                     background: #8B0000;
                     color: white;
-                    font-size: 9px;
-                    padding: 2px 4px;
-                    border-radius: 2px;
+                    font-size: 10px;
+                    padding: 2px 5px;
+                    border-top-right-radius: 4px;
                     font-weight: bold;
+                    line-height: 1;
                 }}
             </style>
         </head>
@@ -319,16 +335,15 @@ class SearchResultBox(QFrame):
         self.label.setAlignment(Qt.AlignCenter)
         self.label.setStyleSheet("""
             QLabel {
-                background: #8B0000;
-                color: white;
+                background: transparent;
+                color: #555;
                 font-size: 11px;
                 font-weight: bold;
-                padding: 3px;
-                border-radius: 3px;
+                padding: 0px;
             }
         """)
         self.label.setFixedHeight(20)
-        # layout.addWidget(self.label)
+        layout.addWidget(self.label)
         
         self.setLayout(layout)
         self.setStyleSheet("""
@@ -343,9 +358,7 @@ class SearchResultBox(QFrame):
             }
         """)
         
-        # Tooltip only shows if UCS code exists
         if ucs_code:
-            # print(char)
             self.setToolTip(f"{char}\n{ucs_code}")
     
     def mousePressEvent(self, event):
@@ -354,7 +367,7 @@ class SearchResultBox(QFrame):
         super().mousePressEvent(event)
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 4. CHARACTER DESCRIPTION WINDOW (from description.py logic)
+# 4. WINDOW CLASSES
 # ═══════════════════════════════════════════════════════════════════════════
 
 class SectionHeader(QFrame):
@@ -394,7 +407,7 @@ class TableRow(QFrame):
         layout.setSpacing(0)
         
         self.label_frame = QFrame()
-        self.label_frame.setFixedWidth(100)
+        self.label_frame.setFixedWidth(140) # Slightly wider for English text
         self.label_frame.setStyleSheet("QFrame{background:#F5F5F0;border:1px solid #CCC;border-right:none;}")
         l_layout = QVBoxLayout()
         l_layout.setContentsMargins(8, 8, 8, 8)
@@ -439,7 +452,6 @@ class TableRow(QFrame):
                 item.widget().deleteLater()
 
 class VariantCharacterBox(QFrame):
-    """Variant box widget"""
     clicked = pyqtSignal(object)
     
     def __init__(self, char="", code="", img_path="", variant_code="", parent=None):
@@ -535,7 +547,6 @@ class VariantCharacterBox(QFrame):
         super().mousePressEvent(event)
 
 class VariantDetailWindow(QDialog):
-    """Variant detail window"""
     def __init__(self, variant_code, parent=None):
         super().__init__(parent)
         self.variant_code = variant_code
@@ -665,6 +676,142 @@ class VariantDetailWindow(QDialog):
         btn_frame.setLayout(btn_layout)
         content_layout.addWidget(btn_frame)
         
+        content_widget.setLayout(content_layout)
+        scroll.setWidget(content_widget)
+        main_layout.addWidget(scroll)
+        self.setLayout(main_layout)
+
+# ═══════════════════════════════════════════════════════════════════════════
+# NEW: APPENDIX DETAIL WINDOW
+# ═══════════════════════════════════════════════════════════════════════════
+
+class AppendixDetailWindow(QDialog):
+    """New Window to show Appendix Details with English Labels"""
+    def __init__(self, appendix_id, char, parent=None):
+        super().__init__(parent)
+        self.appendix_id = appendix_id
+        self.char = char
+        self.setWindowTitle(f'Appendix Details - {char}')
+        self.setGeometry(150, 150, 800, 700)
+        self.setStyleSheet("background-color: #E8D4C8;")
+        self.initUI()
+
+    def initUI(self):
+        main_layout = QVBoxLayout()
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet("QScrollArea{border:none;background-color:#E8D4C8;}")
+        
+        content_widget = QWidget()
+        content_widget.setStyleSheet("background-color: #E8D4C8;")
+        content_layout = QVBoxLayout()
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(0)
+        
+        content_layout.addWidget(SectionHeader("Appendix Information"))
+        
+        # Fetch data
+        data = get_appendix_info(self.appendix_id)
+        
+        if data:
+            # Unpack: result_char, icon_label, char_form, radical_stroke, pronunciation, 
+            # examples_or_notes, char_code, surname_single, surname_compound, surname_double
+            (result_char, icon_label, char_form, radical_stroke, pronunciation, 
+             examples_or_notes, char_code, surname_single, surname_compound, surname_double) = data
+             
+            custom_css, custom_stack = font_manager.get_font_data_for_char(result_char or "")
+
+            # --- Row 1: Header (Char + Icon) ---
+            row1 = TableRow("Character")
+            h_box = QWidget(); h_lay = QHBoxLayout(); h_lay.setContentsMargins(0,0,0,0); h_lay.setSpacing(20)
+            
+            # Big Char View
+            char_view = QWebEngineView()
+            char_view.setFixedSize(120, 100)
+            char_view.page().setBackgroundColor(Qt.transparent)
+            char_view.setAttribute(Qt.WA_TransparentForMouseEvents)
+            char_html = f"""
+            <html><head><style>{custom_css}
+            body {{ margin:0; padding:0; display:flex; align-items:center; justify-content:center; background:transparent; overflow:hidden; }}
+            .v {{ font-family: {custom_stack}; font-size: 64px; color: #8B0000; font-weight: bold; line-height: 1; }}
+            </style></head><body><div class="v">{result_char}</div></body></html>
+            """
+            char_view.setHtml(char_html, QUrl.fromLocalFile(SCRIPT_DIR))
+            h_lay.addWidget(char_view)
+            
+            # Icon Label
+            if icon_label:
+                icon_lbl = QLabel(f"Type: {icon_label}")
+                icon_lbl.setStyleSheet("color:#555; font-weight:bold; font-size:16px;")
+                h_lay.addWidget(icon_lbl)
+                
+            h_lay.addStretch()
+            h_box.setLayout(h_lay)
+            row1.clear_content()
+            row1.content_layout.addWidget(h_box)
+            content_layout.addWidget(row1)
+            
+            # --- Dynamic Rows based on Data ---
+            
+            if char_code:
+                r = TableRow("Surname Code")
+                r.add_text_label(char_code, 16)
+                content_layout.addWidget(r)
+
+            if char_form:
+                r = TableRow("Character\nForm")
+                # Char form often contains images or special chars
+                html = format_text_with_images(char_form, "default", custom_css, custom_stack)
+                r.set_html_content(html, 60)
+                content_layout.addWidget(r)
+                
+            if radical_stroke:
+                r = TableRow("Radical /\nStroke")
+                r.add_text_label(radical_stroke, 14)
+                content_layout.addWidget(r)
+                
+            if pronunciation:
+                r = TableRow("Pronunciation")
+                r.add_text_label(pronunciation, 16)
+                content_layout.addWidget(r)
+                
+            if examples_or_notes:
+                r = TableRow("Examples /\nNotes")
+                html = format_text_with_images(examples_or_notes, "default", custom_css, custom_stack)
+                r.set_html_content(html, 100)
+                content_layout.addWidget(r)
+                
+            # Surname Specifics
+            if surname_single:
+                r = TableRow("Single\nSurname")
+                r.add_text_label(surname_single, 14)
+                content_layout.addWidget(r)
+                
+            if surname_compound:
+                r = TableRow("Compound\nSurname")
+                r.add_text_label(surname_compound, 14)
+                content_layout.addWidget(r)
+                
+            if surname_double:
+                r = TableRow("Double\nSurname")
+                r.add_text_label(surname_double, 14)
+                content_layout.addWidget(r)
+
+        # Close Button
+        btn_frame = QFrame()
+        btn_layout = QHBoxLayout()
+        btn_layout.setContentsMargins(20, 15, 20, 15)
+        btn_layout.addStretch()
+        close_btn = QPushButton("Close")
+        close_btn.setStyleSheet("QPushButton{background:#666;color:white;border:none;border-radius:5px;padding:8px 25px;}")
+        close_btn.clicked.connect(self.close)
+        btn_layout.addWidget(close_btn)
+        btn_frame.setLayout(btn_layout)
+        content_layout.addWidget(btn_frame)
+        
+        content_layout.addStretch()
         content_widget.setLayout(content_layout)
         scroll.setWidget(content_widget)
         main_layout.addWidget(scroll)
@@ -980,7 +1127,6 @@ class DictionaryApp(QMainWindow):
         self.tabs.setTabText(1, f"Appendix ({len(appendix_results)})")
 
     def populate_grid(self, scroll_area, results, is_text_type=True):
-        # Create a new container widget for the grid
         container = QWidget()
         container.setStyleSheet("background: #FDFDFD;")
         grid = QGridLayout()
@@ -1000,19 +1146,21 @@ class DictionaryApp(QMainWindow):
                 if is_text_type:
                     # unpack: result_char, result_code, ucs_code, radical_stroke, detail_url, data_sn, icon_label
                     r_char, r_code, ucs, rs, url, sn, icon = item
-                    full_text = f"{r_char}{r_code}" # simplified full text ID
+                    full_text = f"{r_char}{r_code}" 
                     bottom = r_code
                 else:
-                    # unpack: result_char, icon_label, ucs_code, radical_stroke, detail_url, appendix_id, anchor_id
-                    r_char, icon, ucs, rs, url, app_id, anchor = item
-                    full_text = f"Appendix:{app_id}"
+                    # FIXED: unpack 'id' at the end (from get_search_results update)
+                    r_char, icon, ucs, rs, url, anchor, search_res_id = item
+                    
+                    # Store ID in full_text with prefix for click handler
+                    full_text = f"Appendix:{search_res_id}"
                     bottom = icon or "Appendix"
 
                 # Create Box
                 box = SearchResultBox(
                     char=r_char,
                     alter_char=r_char[0][0],
-                    bottom_label=bottom,
+                    bottom_label="" if icon else bottom,
                     ucs_code=ucs,
                     icon_label=icon,
                     full_text=full_text
@@ -1026,42 +1174,49 @@ class DictionaryApp(QMainWindow):
                     col = 0
                     row += 1
         
-        # Add a stretch to the last row and column to keep grid tight
         grid.setRowStretch(row + 1, 1)
         grid.setColumnStretch(columns, 1)
-        
         container.setLayout(grid)
         scroll_area.setWidget(container)
 
     def on_result_clicked(self, full_text, ucs_code):
-        # Determine main code from full text or db lookup
-        # For simplicity in this example, we try to find the main code based on the clicked char
-        # In a real scenario, you might parse 'full_text' or use 'ucs_code' to lookup the 'summary' table.
-        
-        # Try to extract a code pattern like A01234
+        # ─── 1. APPENDIX LOGIC ─────────────────────────────
+        if full_text.startswith("Appendix:"):
+            # Extract the ID from the string "Appendix:123"
+            search_res_id = full_text.split(":")[1]
+            
+            # Helper to get the title char (since we don't have it in the clicked signal directly)
+            # We look it up in search_results using the ID to be 100% sure we have the right char
+            conn = sqlite3.connect(DB)
+            cur = conn.cursor()
+            cur.execute("SELECT result_char FROM search_results WHERE id=?", (search_res_id,))
+            res = cur.fetchone()
+            conn.close()
+            
+            char_title = res[0] if res else "?"
+
+            self.app_window = AppendixDetailWindow(search_res_id, char_title, self)
+            self.app_window.show()
+            return
+
+        # ─── 2. STANDARD TEXT LOGIC ────────────────────────
         extracted_code = extract_code_from_text(full_text)
-        
         char_info = None
         
-        # 1. Try finding by extracted code
         if extracted_code:
             char_info = get_character_by_code(extracted_code)
         
-        # 2. If not found, check if it's a variant code
         if not char_info and extracted_code:
             main_code = find_main_code_from_variant(extracted_code)
             if main_code:
                 char_info = get_character_by_code(main_code)
 
-        # 3. If still not found, try searching by the text itself (UCS code or Char)
         if not char_info:
-            # Clean char from full_text
             clean_char = full_text[0] if full_text else ""
             char_info = get_character_info(clean_char)
 
         if char_info:
             code, char = char_info
-            # Open Description Window
             self.desc_window = CharacterDescriptionWindow(char, code, self)
             self.desc_window.show()
         else:
